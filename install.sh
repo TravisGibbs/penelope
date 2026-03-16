@@ -6,7 +6,7 @@ set -euo pipefail
 # Or with targets: curl ... | bash -s -- codex
 # Or both:         curl ... | bash -s -- all
 
-REPO_URL="${PENELOPE_REPO:-https://github.com/travisgibs/penelope.git}"
+REPO_URL="${PENELOPE_REPO:-https://github.com/TravisGibbs/penelope.git}"
 INSTALL_DIR="${PENELOPE_INSTALL_DIR:-$HOME/.penelope/bin}"
 SRC_DIR="${PENELOPE_SRC_DIR:-$HOME/.penelope/src}"
 TARGETS="${1:-claude}"
