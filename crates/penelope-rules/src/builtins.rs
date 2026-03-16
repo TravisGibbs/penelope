@@ -229,6 +229,56 @@ pub fn builtin_allow_rules() -> Vec<Rule> {
             pattern: r"^gh\s".into(),
             reason: None,
         },
+        Rule {
+            name: "docker".into(),
+            pattern: r"^docker\s".into(),
+            reason: None,
+        },
+        Rule {
+            name: "docker-compose".into(),
+            pattern: r"^docker[-\s]compose\s".into(),
+            reason: None,
+        },
+        Rule {
+            name: "kubectl".into(),
+            pattern: r"^kubectl\s".into(),
+            reason: None,
+        },
+        Rule {
+            name: "terraform".into(),
+            pattern: r"^terraform\s".into(),
+            reason: None,
+        },
+        Rule {
+            name: "ruby-node-bun".into(),
+            pattern: r"^(ruby|node|bun|deno|go|java|javac|rustc|gcc|g\+\+|clang)\s".into(),
+            reason: None,
+        },
+        Rule {
+            name: "rm-local".into(),
+            pattern: r"^rm\s+(-[a-zA-Z]*\s+)*\.".into(),
+            reason: None,
+        },
+        Rule {
+            name: "chmod-chown-local".into(),
+            pattern: r"^(chmod|chown)\s".into(),
+            reason: None,
+        },
+        Rule {
+            name: "source-dot".into(),
+            pattern: r"^(\.|source)\s".into(),
+            reason: None,
+        },
+        Rule {
+            name: "cat-heredoc-write".into(),
+            pattern: r"^cat\s".into(),
+            reason: None,
+        },
+        Rule {
+            name: "render-cli".into(),
+            pattern: r"^render\s".into(),
+            reason: None,
+        },
     ]
 }
 

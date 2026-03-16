@@ -364,7 +364,7 @@ mod tests {
     #[tokio::test]
     async fn offline_escalate_asks_human() {
         let p = pipeline_with_offline(OfflineAction::Escalate);
-        let r = p.evaluate("terraform apply").await;
+        let r = p.evaluate("some-unknown-tool --dangerous-flag").await;
         assert!(matches!(r.decision, Decision::AskHuman { .. }));
         assert_eq!(r.tier1_verdict, "escalate_human");
     }
@@ -372,7 +372,7 @@ mod tests {
     #[tokio::test]
     async fn offline_allow_passes_through() {
         let p = pipeline_with_offline(OfflineAction::Allow);
-        let r = p.evaluate("terraform apply").await;
+        let r = p.evaluate("some-unknown-tool --dangerous-flag").await;
         assert!(matches!(r.decision, Decision::Execute));
         assert_eq!(r.tier1_verdict, "escalate_allowed");
     }
@@ -380,7 +380,7 @@ mod tests {
     #[tokio::test]
     async fn offline_block_blocks() {
         let p = pipeline_with_offline(OfflineAction::Block);
-        let r = p.evaluate("terraform apply").await;
+        let r = p.evaluate("some-unknown-tool --dangerous-flag").await;
         assert!(matches!(r.decision, Decision::Block { .. }));
         assert_eq!(r.tier1_verdict, "escalate_blocked");
     }

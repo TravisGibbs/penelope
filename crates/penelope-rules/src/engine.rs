@@ -106,8 +106,8 @@ mod tests {
     #[test]
     fn allows_rm_rf_local() {
         let e = engine();
-        // rm on a local dir should escalate (not blocked, not allowed)
-        assert_eq!(e.evaluate("rm -rf ./build"), Verdict::Escalate);
+        // rm on a local dir is allowed (matches rm-local rule)
+        assert_eq!(e.evaluate("rm -rf ./build"), Verdict::Allow);
     }
 
     #[test]
@@ -154,8 +154,11 @@ mod tests {
     #[test]
     fn escalates_unknown() {
         let e = engine();
-        assert_eq!(e.evaluate("docker run --rm ubuntu"), Verdict::Escalate);
-        assert_eq!(e.evaluate("terraform apply"), Verdict::Escalate);
+        // These are now in the allowlist
+        assert_eq!(e.evaluate("docker run --rm ubuntu"), Verdict::Allow);
+        assert_eq!(e.evaluate("terraform apply"), Verdict::Allow);
+        // Truly unknown commands still escalate
+        assert_eq!(e.evaluate("some-obscure-tool --flag"), Verdict::Escalate);
     }
 
     #[test]
