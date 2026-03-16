@@ -21,7 +21,7 @@ use audit::AuditLog;
 use config::Config;
 use pipeline::Pipeline;
 use remote::RemoteLogger;
-use tier2::{OfflineAction, Tier2Client};
+use tier2::Tier2Client;
 
 #[derive(Parser)]
 #[command(
@@ -206,13 +206,12 @@ fn build_pipeline(config: &Config) -> (Pipeline, AuditLog, Option<RemoteLogger>)
         std::process::exit(1);
     });
 
-    let offline_action = OfflineAction::from_str(&config.tier2.offline_action);
     let tier2 = Tier2Client::new(&config.tier2);
     if tier2.is_some() {
         tracing::info!("Tier 2 NLI classifier enabled");
     }
 
-    let pipeline = Pipeline::new(engine, offline_action, tier2);
+    let pipeline = Pipeline::new(engine, tier2);
     let audit = AuditLog::new(&config.log_file_path());
 
     let remote = RemoteLogger::new(&config.remote);

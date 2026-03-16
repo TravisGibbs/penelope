@@ -2,7 +2,7 @@ use penelope_rules::{Tier1Engine, Verdict};
 use std::time::Instant;
 
 use crate::normalize::{self, NormalizedCommand};
-use crate::tier2::{ClassifyRequest, EscalationTarget, OfflineAction, Tier2Client};
+use crate::tier2::{ClassifyRequest, EscalationTarget, Tier2Client};
 
 /// The final decision after evaluating a command.
 #[derive(Debug)]
@@ -38,24 +38,21 @@ pub struct EvalResult {
 pub struct Pipeline {
     tier1: Tier1Engine,
     tier2: Option<Tier2Client>,
-    /// What to do when a command is escalated and tier2 is unavailable.
-    offline_action: OfflineAction,
 }
 
 impl Pipeline {
-    pub fn new(
-        tier1: Tier1Engine,
-        offline_action: OfflineAction,
-        tier2: Option<Tier2Client>,
-    ) -> Self {
-        Self {
-            tier1,
-            tier2,
-            offline_action,
-        }
+    pub fn new(tier1: Tier1Engine, tier2: Option<Tier2Client>) -> Self {
+        Self { tier1, tier2 }
     }
 
     /// Evaluate a raw command string through the pipeline.
+    ///
+    /// Flow:
+    /// 1. Tier 1: allow / block / escalate
+    /// 2. If escalated + no reasoning → ask agent for --penelope-reasoning
+    /// 3. If escalated + reasoning → send to Tier 2 for model evaluation
+    /// 4. Tier 1 blocks can be overridden by reasoning (without model)
+    /// 5. Tier 2 blocks respect escalation_target (agent retry or human review)
     pub async fn evaluate(&self, raw_cmd: &str) -> EvalResult {
         let start = Instant::now();
         let normalized = normalize::normalize(raw_cmd);
@@ -63,50 +60,34 @@ impl Pipeline {
 
         let mut result = self.evaluate_inner(&normalized, raw_cmd, start).await;
 
-        // If agent provided reasoning, attempt to override blocks.
-        // Tier 1 blocks are overridable by reasoning (agent explains why it's safe).
-        // Tier 2 blocks (when wired up) will re-evaluate with reasoning as context
-        // and can reject the override — indicated by tier2_reasoning_rejected.
+        // Handle reasoning overrides for Tier 1 blocks
         if has_reasoning {
             if let Decision::Block { ref reason } = result.decision {
                 if result.tier2_reasoning_rejected {
-                    // Tier 2 saw the reasoning and still said block — hard block.
+                    // Tier 2 evaluated reasoning and still blocked — hard block
                     tracing::warn!(
                         command = raw_cmd,
                         reasoning = normalized.reasoning.as_deref().unwrap_or(""),
                         original_block = reason.as_str(),
                         "Agent reasoning rejected by Tier 2, maintaining block"
                     );
-                    // Keep the block, but record that reasoning was provided
                     result.reasoning_override = normalized.reasoning.clone();
-                } else {
-                    // No Tier 2 rejection — reasoning overrides the block
+                } else if result.tier2_risk_level.is_none() {
+                    // Tier 1 block, no Tier 2 involved — reasoning overrides
                     tracing::info!(
                         command = raw_cmd,
                         reasoning = normalized.reasoning.as_deref().unwrap_or(""),
                         original_block = reason.as_str(),
-                        "Block overridden by agent reasoning"
+                        "Tier 1 block overridden by agent reasoning"
                     );
                     result.reasoning_override = normalized.reasoning.clone();
                     result.decision = Decision::Execute;
                 }
+                // If Tier 2 was involved and didn't reject, decision already set correctly
             }
         }
 
         result
-    }
-
-    /// Apply offline action when a command is escalated and tier2 is unavailable.
-    fn apply_offline_action(&self, reason: &str) -> Decision {
-        match self.offline_action {
-            OfflineAction::Allow => Decision::Execute,
-            OfflineAction::Block => Decision::Block {
-                reason: reason.to_string(),
-            },
-            OfflineAction::Escalate => Decision::AskHuman {
-                reason: reason.to_string(),
-            },
-        }
     }
 
     fn make_result(
@@ -132,14 +113,32 @@ impl Pipeline {
         }
     }
 
-    /// Handle an escalated command — call Tier 2 if available, otherwise apply offline action.
+    /// Handle an escalated command.
+    ///
+    /// Flow:
+    /// - No reasoning attached → always ask agent for reasoning
+    /// - Reasoning attached → send to Tier 2 if available
+    /// - Tier 2 unavailable but has reasoning → allow (agent already explained)
     async fn handle_escalation(
         &self,
         normalized: &NormalizedCommand,
         start: Instant,
     ) -> EvalResult {
+        // Step 1: No reasoning? Always ask the agent first.
+        if normalized.reasoning.is_none() {
+            return self.make_result(
+                Decision::AskHuman {
+                    reason: "Command not recognized — provide reasoning to proceed".into(),
+                },
+                "escalate_ask_agent",
+                None,
+                normalized,
+                start,
+            );
+        }
+
+        // Step 2: Reasoning attached — send to Tier 2 if available.
         if let Some(ref tier2) = self.tier2 {
-            // Build classification request
             let mut evasion_types = Vec::new();
             if normalized.has_eval { evasion_types.push("eval".into()); }
             if normalized.has_substitution { evasion_types.push("substitution".into()); }
@@ -158,14 +157,13 @@ impl Pipeline {
             match tier2.classify(&req).await {
                 Ok(tier2_result) => {
                     let reason_str = format!(
-                        "Tier 2 classified as {} (confidence: {:.0}%): {}",
+                        "Tier 2: {} (confidence: {:.0}%): {}",
                         tier2_result.risk_level,
                         tier2_result.confidence * 100.0,
                         tier2_result.reasoning
                     );
 
                     let decision = if tier2_result.risk_level.should_block() {
-                        // Model says block — route to the escalation target
                         match tier2_result.escalation_target {
                             EscalationTarget::Human => Decision::AskHuman {
                                 reason: reason_str,
@@ -198,29 +196,27 @@ impl Pipeline {
                     }
                 }
                 Err(e) => {
-                    tracing::warn!("Tier 2 classification failed: {}, applying offline action", e);
-                    let decision = self.apply_offline_action(
-                        &format!("Tier 2 unavailable ({})", e),
-                    );
-                    let verdict_str = match &decision {
-                        Decision::Execute => "tier2_fallback_allowed",
-                        Decision::Block { .. } => "tier2_fallback_blocked",
-                        Decision::AskHuman { .. } => "tier2_fallback_human",
-                    };
-                    self.make_result(decision, verdict_str, None, normalized, start)
+                    // Tier 2 failed but agent provided reasoning — trust the agent
+                    tracing::warn!("Tier 2 unavailable ({}), allowing with agent reasoning", e);
+                    self.make_result(
+                        Decision::Execute,
+                        "tier2_fallback_reasoning_allowed",
+                        None,
+                        normalized,
+                        start,
+                    )
                 }
             }
         } else {
-            // No Tier 2 configured — apply offline action
-            let decision = self.apply_offline_action(
-                "Command requires review (no Tier 2 classifier available)",
-            );
-            let verdict_str = match &decision {
-                Decision::Execute => "escalate_allowed",
-                Decision::Block { .. } => "escalate_blocked",
-                Decision::AskHuman { .. } => "escalate_human",
-            };
-            self.make_result(decision, verdict_str, None, normalized, start)
+            // No Tier 2 configured but agent provided reasoning — allow
+            tracing::info!("No Tier 2 configured, allowing with agent reasoning");
+            self.make_result(
+                Decision::Execute,
+                "escalate_reasoning_allowed",
+                None,
+                normalized,
+                start,
+            )
         }
     }
 
@@ -303,13 +299,9 @@ mod tests {
     use penelope_rules::builtins::{builtin_allow_rules, builtin_block_rules};
 
     fn pipeline() -> Pipeline {
-        pipeline_with_offline(OfflineAction::Allow)
-    }
-
-    fn pipeline_with_offline(action: OfflineAction) -> Pipeline {
         let engine =
             Tier1Engine::new(builtin_block_rules(), builtin_allow_rules()).unwrap();
-        Pipeline::new(engine, action, None)
+        Pipeline::new(engine, None)
     }
 
     #[tokio::test]
@@ -373,39 +365,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn offline_escalate_asks_human() {
-        let p = pipeline_with_offline(OfflineAction::Escalate);
+    async fn unknown_command_asks_agent_for_reasoning() {
+        let p = pipeline();
         let r = p.evaluate("some-unknown-tool --dangerous-flag").await;
         assert!(matches!(r.decision, Decision::AskHuman { .. }));
-        assert_eq!(r.tier1_verdict, "escalate_human");
+        assert_eq!(r.tier1_verdict, "escalate_ask_agent");
     }
 
     #[tokio::test]
-    async fn offline_allow_passes_through() {
-        let p = pipeline_with_offline(OfflineAction::Allow);
-        let r = p.evaluate("some-unknown-tool --dangerous-flag").await;
+    async fn unknown_command_with_reasoning_allowed_without_tier2() {
+        let p = pipeline();
+        let r = p.evaluate("some-unknown-tool --flag --penelope-reasoning \"safe internal tool\"").await;
         assert!(matches!(r.decision, Decision::Execute));
-        assert_eq!(r.tier1_verdict, "escalate_allowed");
+        assert_eq!(r.tier1_verdict, "escalate_reasoning_allowed");
     }
 
     #[tokio::test]
-    async fn offline_block_blocks() {
-        let p = pipeline_with_offline(OfflineAction::Block);
-        let r = p.evaluate("some-unknown-tool --dangerous-flag").await;
-        assert!(matches!(r.decision, Decision::Block { .. }));
-        assert_eq!(r.tier1_verdict, "escalate_blocked");
-    }
-
-    #[tokio::test]
-    async fn offline_mode_doesnt_affect_tier1_allow() {
-        let p = pipeline_with_offline(OfflineAction::Escalate);
+    async fn tier1_allow_not_affected() {
+        let p = pipeline();
         let r = p.evaluate("ls -la").await;
         assert!(matches!(r.decision, Decision::Execute));
     }
 
     #[tokio::test]
-    async fn offline_mode_doesnt_affect_tier1_block() {
-        let p = pipeline_with_offline(OfflineAction::Escalate);
+    async fn tier1_block_not_affected() {
+        let p = pipeline();
         let r = p.evaluate("rm -rf /").await;
         assert!(matches!(r.decision, Decision::Block { .. }));
     }
