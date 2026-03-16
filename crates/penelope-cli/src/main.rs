@@ -7,6 +7,7 @@ mod normalize;
 mod pipeline;
 mod session;
 mod shell;
+mod tier2;
 
 use std::process::ExitCode;
 
@@ -17,6 +18,7 @@ use penelope_rules::Tier1Engine;
 use audit::AuditLog;
 use config::Config;
 use pipeline::Pipeline;
+use tier2::OfflineAction;
 
 #[derive(Parser)]
 #[command(
@@ -134,6 +136,13 @@ fn main() -> ExitCode {
                     println!("  Evaluation time: {}μs", result.duration_us);
                     ExitCode::from(1)
                 }
+                pipeline::Decision::AskHuman { reason } => {
+                    println!("ASK HUMAN: {}", reason);
+                    println!("  Tier 1: {}", result.tier1_verdict);
+                    println!("  Segments: {:?}", result.normalized.segments);
+                    println!("  Evaluation time: {}μs", result.duration_us);
+                    ExitCode::from(2)
+                }
             }
         }
         Some(Commands::Hook) => {
@@ -163,7 +172,6 @@ fn main() -> ExitCode {
 }
 
 fn build_pipeline(config: &Config) -> (Pipeline, AuditLog) {
-    // Combine built-in rules with config rules
     let mut block_rules = builtin_block_rules();
     let mut allow_rules = builtin_allow_rules();
 
@@ -175,7 +183,8 @@ fn build_pipeline(config: &Config) -> (Pipeline, AuditLog) {
         std::process::exit(1);
     });
 
-    let pipeline = Pipeline::new(engine);
+    let offline_action = OfflineAction::from_str(&config.tier2.offline_action);
+    let pipeline = Pipeline::new(engine, offline_action);
     let audit = AuditLog::new(&config.log_file_path());
 
     (pipeline, audit)

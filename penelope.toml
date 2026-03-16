@@ -17,10 +17,22 @@
 # pattern = "^my-safe-tool\\s"
 
 [tier2]
-# socket_path = "/tmp/penelope-sidecar.sock"
+# NLI model endpoint for semantic risk classification
+# endpoint = "http://localhost:8000/classify"
 # timeout_ms = 100
-# timeout_action = "allow"  # allow | block | prompt
-# sidecar_auto_start = true
+# enabled = false
+
+# What to do when tier2 is unavailable and a command is escalated:
+#   "escalate" = ask the human for approval (default)
+#   "allow"    = allow the command
+#   "block"    = block the command
+offline_action = "escalate"
+
+[remote]
+# Remote API for centralized audit logging
+# endpoint = "https://penelope-api.onrender.com/api/v1/events"
+# api_key = "your-api-key"
+# enabled = false
 
 [human_in_the_loop]
 # enabled = true

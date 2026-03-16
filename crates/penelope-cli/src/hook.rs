@@ -96,6 +96,10 @@ pub fn hook_mode(pipeline: &Pipeline, audit: &AuditLog) -> ExitCode {
         } else {
             None
         },
+        tier2_risk_level: result.tier2_risk_level.clone(),
+        tier2_confidence: result.tier2_confidence,
+        tier2_reasoning: result.tier2_reasoning.clone(),
+        tier2_latency_us: result.tier2_latency_us,
     };
 
     match result.decision {
@@ -129,7 +133,6 @@ pub fn hook_mode(pipeline: &Pipeline, audit: &AuditLog) -> ExitCode {
             audit_entry.exit_code = Some(2);
             audit.write(&audit_entry);
 
-            // Output deny decision as JSON to stdout
             let output = HookOutput {
                 hook_specific_output: HookSpecificOutput {
                     hook_event_name: "PreToolUse".into(),
@@ -139,12 +142,32 @@ pub fn hook_mode(pipeline: &Pipeline, audit: &AuditLog) -> ExitCode {
                 },
             };
             let _ = serde_json::to_writer(std::io::stdout(), &output);
-            println!(); // newline after JSON
+            println!();
 
-            // Also write reason to stderr for visibility
             eprintln!("penelope: BLOCKED — {}", reason);
-
             ExitCode::from(2)
+        }
+        Decision::AskHuman { reason } => {
+            audit_entry.final_decision = "escalate_human".into();
+            audit_entry.reason = Some(reason.clone());
+            audit.write(&audit_entry);
+
+            // Return "ask" — Claude Code will prompt the user for approval
+            let output = HookOutput {
+                hook_specific_output: HookSpecificOutput {
+                    hook_event_name: "PreToolUse".into(),
+                    permission_decision: "ask".into(),
+                    permission_decision_reason: Some(format!(
+                        "penelope: {} — please review this command",
+                        reason
+                    )),
+                    updated_command: None,
+                },
+            };
+            let _ = serde_json::to_writer(std::io::stdout(), &output);
+            println!();
+
+            ExitCode::SUCCESS
         }
     }
 }

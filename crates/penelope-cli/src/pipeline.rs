@@ -2,6 +2,7 @@ use penelope_rules::{Tier1Engine, Verdict};
 use std::time::Instant;
 
 use crate::normalize::{self, NormalizedCommand};
+use crate::tier2::OfflineAction;
 
 /// The final decision after evaluating a command.
 #[derive(Debug)]
@@ -10,6 +11,8 @@ pub enum Decision {
     Execute,
     /// Command is blocked.
     Block { reason: String },
+    /// Command needs human approval (offline escalation).
+    AskHuman { reason: String },
 }
 
 /// Result of pipeline evaluation with metadata for audit logging.
@@ -20,23 +23,26 @@ pub struct EvalResult {
     pub tier1_matched_rule: Option<String>,
     /// Agent-provided reasoning that overrode a block (if any)
     pub reasoning_override: Option<String>,
+    /// Tier 2 classification results (None if tier2 not invoked)
+    pub tier2_risk_level: Option<String>,
+    pub tier2_confidence: Option<f64>,
+    pub tier2_reasoning: Option<String>,
+    pub tier2_latency_us: Option<u64>,
     pub duration_us: u64,
 }
 
-/// The evaluation pipeline. Currently Tier 1 only; Tier 2 will be added later.
+/// The evaluation pipeline.
 pub struct Pipeline {
     tier1: Tier1Engine,
-    /// When true, unknown commands (Escalate) are allowed.
-    /// When Tier 2 is wired up, this will change.
-    allow_on_escalate: bool,
+    /// What to do when a command is escalated and tier2 is unavailable.
+    offline_action: OfflineAction,
 }
 
 impl Pipeline {
-    pub fn new(tier1: Tier1Engine) -> Self {
+    pub fn new(tier1: Tier1Engine, offline_action: OfflineAction) -> Self {
         Self {
             tier1,
-            // MVP: allow unknown commands since Tier 2 isn't available
-            allow_on_escalate: true,
+            offline_action,
         }
     }
 
@@ -65,6 +71,41 @@ impl Pipeline {
         result
     }
 
+    /// Apply offline action when a command is escalated and tier2 is unavailable.
+    fn apply_offline_action(&self, reason: &str) -> Decision {
+        match self.offline_action {
+            OfflineAction::Allow => Decision::Execute,
+            OfflineAction::Block => Decision::Block {
+                reason: reason.to_string(),
+            },
+            OfflineAction::Escalate => Decision::AskHuman {
+                reason: reason.to_string(),
+            },
+        }
+    }
+
+    fn make_result(
+        &self,
+        decision: Decision,
+        tier1_verdict: &str,
+        tier1_matched_rule: Option<String>,
+        normalized: &NormalizedCommand,
+        start: Instant,
+    ) -> EvalResult {
+        EvalResult {
+            decision,
+            tier1_verdict: tier1_verdict.into(),
+            tier1_matched_rule,
+            reasoning_override: None,
+            tier2_risk_level: None,
+            tier2_confidence: None,
+            tier2_reasoning: None,
+            tier2_latency_us: None,
+            normalized: normalized.clone(),
+            duration_us: start.elapsed().as_micros() as u64,
+        }
+    }
+
     fn evaluate_inner(
         &self,
         normalized: &NormalizedCommand,
@@ -73,44 +114,29 @@ impl Pipeline {
     ) -> EvalResult {
         // If evasion was detected, be conservative
         if normalized.has_evasion() {
-            // Evaluate all segments (including decoded payloads) against Tier 1
-            // If any segment is blocked, block the whole command
             for segment in &normalized.segments {
                 if let Verdict::Block(reason) = self.tier1.evaluate(segment) {
-                    return EvalResult {
-                        decision: Decision::Block {
+                    return self.make_result(
+                        Decision::Block {
                             reason: format!("{} (detected through evasion technique)", reason),
                         },
-                        tier1_verdict: "block".into(),
-                        tier1_matched_rule: Some(reason),
-                        reasoning_override: None,
-                        normalized: normalized.clone(),
-                        duration_us: start.elapsed().as_micros() as u64,
-                    };
+                        "block",
+                        Some(reason),
+                        normalized,
+                        start,
+                    );
                 }
             }
 
-            // Evasion detected but no blocked content found.
-            // For MVP, we still allow but log the evasion.
             tracing::warn!(
                 command = raw_cmd,
                 "Evasion technique detected but no blocked content found"
             );
 
-            return EvalResult {
-                decision: if self.allow_on_escalate {
-                    Decision::Execute
-                } else {
-                    Decision::Block {
-                        reason: "Evasion technique detected, escalation required".into(),
-                    }
-                },
-                tier1_verdict: "escalate_evasion".into(),
-                tier1_matched_rule: None,
-                reasoning_override: None,
-                normalized: normalized.clone(),
-                duration_us: start.elapsed().as_micros() as u64,
-            };
+            let decision = self.apply_offline_action(
+                "Evasion technique detected, requires review",
+            );
+            return self.make_result(decision, "escalate_evasion", None, normalized, start);
         }
 
         // Evaluate each segment — block if ANY segment is blocked
@@ -119,16 +145,13 @@ impl Pipeline {
         for segment in &normalized.segments {
             match self.tier1.evaluate(segment) {
                 Verdict::Block(reason) => {
-                    return EvalResult {
-                        decision: Decision::Block {
-                            reason: reason.clone(),
-                        },
-                        tier1_verdict: "block".into(),
-                        tier1_matched_rule: Some(reason),
-                        reasoning_override: None,
-                        normalized: normalized.clone(),
-                        duration_us: start.elapsed().as_micros() as u64,
-                    };
+                    return self.make_result(
+                        Decision::Block { reason: reason.clone() },
+                        "block",
+                        Some(reason),
+                        normalized,
+                        start,
+                    );
                 }
                 Verdict::Escalate => {
                     worst_verdict = Verdict::Escalate;
@@ -137,35 +160,30 @@ impl Pipeline {
             }
         }
 
-        let (decision, verdict_str) = match worst_verdict {
-            Verdict::Allow => (Decision::Execute, "allow"),
-            Verdict::Escalate => {
-                if self.allow_on_escalate {
-                    (Decision::Execute, "escalate_allowed")
-                } else {
-                    (
-                        Decision::Block {
-                            reason: "Command requires Tier 2 evaluation (not available)".into(),
-                        },
-                        "escalate_blocked",
-                    )
-                }
+        match worst_verdict {
+            Verdict::Allow => {
+                self.make_result(Decision::Execute, "allow", None, normalized, start)
             }
-            Verdict::Block(ref reason) => (
-                Decision::Block {
-                    reason: reason.clone(),
-                },
+            Verdict::Escalate => {
+                // Tier 2 would go here when wired up.
+                // For now, apply offline action.
+                let decision = self.apply_offline_action(
+                    "Command requires review (no Tier 2 classifier available)",
+                );
+                let verdict_str = match &decision {
+                    Decision::Execute => "escalate_allowed",
+                    Decision::Block { .. } => "escalate_blocked",
+                    Decision::AskHuman { .. } => "escalate_human",
+                };
+                self.make_result(decision, verdict_str, None, normalized, start)
+            }
+            Verdict::Block(ref reason) => self.make_result(
+                Decision::Block { reason: reason.clone() },
                 "block",
+                None,
+                normalized,
+                start,
             ),
-        };
-
-        EvalResult {
-            decision,
-            tier1_verdict: verdict_str.into(),
-            tier1_matched_rule: None,
-            reasoning_override: None,
-            normalized: normalized.clone(),
-            duration_us: start.elapsed().as_micros() as u64,
         }
     }
 }
@@ -176,9 +194,13 @@ mod tests {
     use penelope_rules::builtins::{builtin_allow_rules, builtin_block_rules};
 
     fn pipeline() -> Pipeline {
+        pipeline_with_offline(OfflineAction::Allow)
+    }
+
+    fn pipeline_with_offline(action: OfflineAction) -> Pipeline {
         let engine =
             Tier1Engine::new(builtin_block_rules(), builtin_allow_rules()).unwrap();
-        Pipeline::new(engine)
+        Pipeline::new(engine, action)
     }
 
     #[test]
@@ -242,5 +264,43 @@ mod tests {
         let r = p.evaluate("rm -rf /");
         assert!(matches!(r.decision, Decision::Block { .. }));
         assert!(r.reasoning_override.is_none());
+    }
+
+    #[test]
+    fn offline_escalate_asks_human() {
+        let p = pipeline_with_offline(OfflineAction::Escalate);
+        let r = p.evaluate("terraform apply");
+        assert!(matches!(r.decision, Decision::AskHuman { .. }));
+        assert_eq!(r.tier1_verdict, "escalate_human");
+    }
+
+    #[test]
+    fn offline_allow_passes_through() {
+        let p = pipeline_with_offline(OfflineAction::Allow);
+        let r = p.evaluate("terraform apply");
+        assert!(matches!(r.decision, Decision::Execute));
+        assert_eq!(r.tier1_verdict, "escalate_allowed");
+    }
+
+    #[test]
+    fn offline_block_blocks() {
+        let p = pipeline_with_offline(OfflineAction::Block);
+        let r = p.evaluate("terraform apply");
+        assert!(matches!(r.decision, Decision::Block { .. }));
+        assert_eq!(r.tier1_verdict, "escalate_blocked");
+    }
+
+    #[test]
+    fn offline_mode_doesnt_affect_tier1_allow() {
+        let p = pipeline_with_offline(OfflineAction::Escalate);
+        let r = p.evaluate("ls -la");
+        assert!(matches!(r.decision, Decision::Execute));
+    }
+
+    #[test]
+    fn offline_mode_doesnt_affect_tier1_block() {
+        let p = pipeline_with_offline(OfflineAction::Escalate);
+        let r = p.evaluate("rm -rf /");
+        assert!(matches!(r.decision, Decision::Block { .. }));
     }
 }

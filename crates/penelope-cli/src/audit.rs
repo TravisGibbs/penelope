@@ -23,6 +23,15 @@ pub struct AuditEntry {
     /// The original block reason before reasoning override
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overridden_block: Option<String>,
+    /// Tier 2 NLI classification results
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tier2_risk_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tier2_confidence: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tier2_reasoning: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tier2_latency_us: Option<u64>,
 }
 
 pub struct AuditLog {

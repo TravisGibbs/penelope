@@ -11,6 +11,8 @@ pub struct Config {
     #[serde(default)]
     pub tier2: Tier2Config,
     #[serde(default)]
+    pub remote: RemoteConfig,
+    #[serde(default)]
     pub human_in_the_loop: HumanConfig,
 }
 
@@ -36,14 +38,34 @@ pub struct Tier1Config {
 
 #[derive(Debug, Deserialize)]
 pub struct Tier2Config {
-    #[serde(default = "default_socket_path")]
-    pub socket_path: String,
+    /// HTTP endpoint for the NLI model (e.g., "http://localhost:8000/classify")
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    /// Request timeout in milliseconds
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
-    #[serde(default = "default_timeout_action")]
-    pub timeout_action: String,
+    /// Whether tier2 is enabled
     #[serde(default)]
-    pub sidecar_auto_start: bool,
+    pub enabled: bool,
+    /// What to do when tier2 is unavailable: "escalate" | "allow" | "block"
+    #[serde(default = "default_offline_action")]
+    pub offline_action: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RemoteConfig {
+    /// Remote API endpoint for audit logging
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    /// API key for authentication
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Whether remote logging is enabled
+    #[serde(default)]
+    pub enabled: bool,
+    /// Request timeout in milliseconds
+    #[serde(default = "default_remote_timeout_ms")]
+    pub timeout_ms: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,9 +84,9 @@ fn default_real_shell() -> String {
 fn default_log_file() -> String { "~/.penelope/audit.jsonl".into() }
 fn default_log_level() -> String { "info".into() }
 fn default_context_size() -> usize { 20 }
-fn default_socket_path() -> String { "/tmp/penelope-sidecar.sock".into() }
 fn default_timeout_ms() -> u64 { 100 }
-fn default_timeout_action() -> String { "allow".into() }
+fn default_offline_action() -> String { "escalate".into() }
+fn default_remote_timeout_ms() -> u64 { 5000 }
 fn default_true() -> bool { true }
 fn default_timeout_seconds() -> u64 { 30 }
 fn default_deny() -> String { "deny".into() }
@@ -83,10 +105,21 @@ impl Default for GeneralConfig {
 impl Default for Tier2Config {
     fn default() -> Self {
         Self {
-            socket_path: default_socket_path(),
+            endpoint: None,
             timeout_ms: default_timeout_ms(),
-            timeout_action: default_timeout_action(),
-            sidecar_auto_start: false,
+            enabled: false,
+            offline_action: default_offline_action(),
+        }
+    }
+}
+
+impl Default for RemoteConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: None,
+            api_key: None,
+            enabled: false,
+            timeout_ms: default_remote_timeout_ms(),
         }
     }
 }
@@ -142,6 +175,7 @@ impl Config {
             general: GeneralConfig::default(),
             tier1: Tier1Config::default(),
             tier2: Tier2Config::default(),
+            remote: RemoteConfig::default(),
             human_in_the_loop: HumanConfig::default(),
         }
     }

@@ -70,6 +70,10 @@ pub fn evaluate_and_exec(
         } else {
             None
         },
+        tier2_risk_level: result.tier2_risk_level.clone(),
+        tier2_confidence: result.tier2_confidence,
+        tier2_reasoning: result.tier2_reasoning.clone(),
+        tier2_latency_us: result.tier2_latency_us,
     };
 
     match result.decision {
@@ -82,6 +86,25 @@ pub fn evaluate_and_exec(
             audit.write(&audit_entry);
             ExitCode::from(126)
         }
+        Decision::AskHuman { reason } => {
+            // Prompt the user via /dev/tty
+            eprintln!("penelope: REVIEW REQUIRED — {}", reason);
+            eprintln!("penelope: command: {}", cmd);
+
+            let approved = prompt_human(cmd);
+            if approved {
+                audit_entry.final_decision = "execute_human_approved".into();
+                audit_entry.reason = Some(reason);
+                audit.write(&audit_entry);
+                exec_command(stripped_cmd, cmd, original_args, real_shell)
+            } else {
+                audit_entry.final_decision = "block_human_denied".into();
+                audit_entry.reason = Some(reason);
+                audit_entry.exit_code = Some(126);
+                audit.write(&audit_entry);
+                ExitCode::from(126)
+            }
+        }
         Decision::Execute => {
             if result.reasoning_override.is_some() {
                 audit_entry.final_decision = "execute_reasoning_override".into();
@@ -89,30 +112,65 @@ pub fn evaluate_and_exec(
                 audit_entry.final_decision = "execute".into();
             }
             audit.write(&audit_entry);
+            exec_command(stripped_cmd, cmd, original_args, real_shell)
+        }
+    }
+}
 
-            // Build shell args with the stripped command (no --penelope-reasoning)
-            let exec_args: Vec<String> = if stripped_cmd != cmd {
-                // Replace the command in -c args with the stripped version
-                original_args
-                    .iter()
-                    .map(|a| if a == cmd { stripped_cmd.clone() } else { a.clone() })
-                    .collect()
+/// Prompt the user for approval via /dev/tty.
+fn prompt_human(cmd: &str) -> bool {
+    use std::io::{BufRead, Write};
+
+    // Open /dev/tty directly so it works even when stdin/stdout are captured
+    let tty_out = std::fs::OpenOptions::new().write(true).open("/dev/tty");
+    let tty_in = std::fs::File::open("/dev/tty");
+
+    match (tty_out, tty_in) {
+        (Ok(mut out), Ok(input)) => {
+            let _ = writeln!(out, "\npenelope: approve this command? [y/N] {}", cmd);
+            let _ = write!(out, "> ");
+            let _ = out.flush();
+
+            let reader = std::io::BufReader::new(input);
+            if let Some(Ok(line)) = reader.lines().next() {
+                matches!(line.trim().to_lowercase().as_str(), "y" | "yes")
             } else {
-                original_args.to_vec()
-            };
-
-            // Execute the command via the real shell
-            let status = std::process::Command::new(real_shell)
-                .args(&exec_args)
-                .status();
-
-            match status {
-                Ok(s) => ExitCode::from(s.code().unwrap_or(1) as u8),
-                Err(e) => {
-                    eprintln!("penelope: failed to exec {}: {}", real_shell, e);
-                    ExitCode::from(126)
-                }
+                false
             }
+        }
+        _ => {
+            // Can't open /dev/tty — deny by default
+            eprintln!("penelope: cannot open /dev/tty for human approval, denying");
+            false
+        }
+    }
+}
+
+/// Execute a command via the real shell.
+fn exec_command(
+    stripped_cmd: &str,
+    original_cmd: &str,
+    original_args: &[String],
+    real_shell: &str,
+) -> ExitCode {
+    let exec_args: Vec<String> = if stripped_cmd != original_cmd {
+        original_args
+            .iter()
+            .map(|a| if a == original_cmd { stripped_cmd.to_string() } else { a.clone() })
+            .collect()
+    } else {
+        original_args.to_vec()
+    };
+
+    let status = std::process::Command::new(real_shell)
+        .args(&exec_args)
+        .status();
+
+    match status {
+        Ok(s) => ExitCode::from(s.code().unwrap_or(1) as u8),
+        Err(e) => {
+            eprintln!("penelope: failed to exec {}: {}", real_shell, e);
+            ExitCode::from(126)
         }
     }
 }
