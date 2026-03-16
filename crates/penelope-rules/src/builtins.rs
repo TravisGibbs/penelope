@@ -270,6 +270,11 @@ pub fn builtin_allow_rules() -> Vec<Rule> {
             reason: None,
         },
         Rule {
+            name: "open-macos".into(),
+            pattern: r"^open\s".into(),
+            reason: None,
+        },
+        Rule {
             name: "cat-heredoc-write".into(),
             pattern: r"^cat\s".into(),
             reason: None,

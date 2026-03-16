@@ -19,6 +19,8 @@ struct HookInput {
 #[derive(Debug, Deserialize)]
 struct ToolInput {
     command: Option<String>,
+    /// Claude Code sends a description field with the Bash tool — use as reasoning if present
+    description: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -62,16 +64,39 @@ pub async fn hook_mode(
         return ExitCode::SUCCESS;
     }
 
-    let cmd = match hook_input.tool_input.as_ref().and_then(|t| t.command.as_deref()) {
+    let tool_input = match hook_input.tool_input.as_ref() {
+        Some(t) => t,
+        None => return ExitCode::SUCCESS,
+    };
+
+    let raw_cmd = match tool_input.command.as_deref() {
         Some(c) => c,
         None => return ExitCode::SUCCESS,
+    };
+
+    // If the command doesn't have --penelope-reasoning but has a description,
+    // use the description as implicit reasoning. This means agents don't need
+    // to learn the --penelope-reasoning flag — their natural Bash tool description
+    // serves as the explanation.
+    let cmd: String = if !raw_cmd.contains("--penelope-reasoning") {
+        if let Some(desc) = &tool_input.description {
+            if !desc.is_empty() {
+                format!("{} --penelope-reasoning \"{}\"", raw_cmd, desc.replace('"', "'"))
+            } else {
+                raw_cmd.to_string()
+            }
+        } else {
+            raw_cmd.to_string()
+        }
+    } else {
+        raw_cmd.to_string()
     };
 
     let session_id = hook_input
         .session_id
         .unwrap_or_else(get_or_create_session_id);
 
-    let result = pipeline.evaluate(cmd).await;
+    let result = pipeline.evaluate(&cmd).await;
 
     let mut audit_entry = AuditEntry {
         ts: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -148,9 +173,9 @@ pub async fn hook_mode(
                     hook_event_name: "PreToolUse".into(),
                     permission_decision: "deny".into(),
                     permission_decision_reason: Some(format!(
-                        "penelope: {}. To proceed, re-run the command with \
-                         --penelope-reasoning \"<explain why this command is safe>\" \
-                         appended to the command string.",
+                        "penelope: {}. To proceed, add --penelope-reasoning \"<your explanation>\" \
+                         INSIDE the command string value, not as a separate argument. \
+                         Example: command: \"open /Applications/Docker.app --penelope-reasoning \\\"Opening Docker for database\\\"\"",
                         reason
                     )),
                     updated_command: None,
