@@ -5,6 +5,7 @@ mod hook;
 mod install;
 mod normalize;
 mod pipeline;
+mod register;
 mod remote;
 mod session;
 mod shell;
@@ -64,6 +65,12 @@ enum Commands {
     Uninstall {
         #[arg(trailing_var_arg = true)]
         targets: Vec<String>,
+    },
+    /// Register via GitHub OAuth to get an API key
+    Register {
+        /// Manually set an API key instead of OAuth
+        #[arg(long)]
+        key: Option<String>,
     },
 }
 
@@ -156,6 +163,9 @@ async fn main() -> ExitCode {
         }
         Some(Commands::Uninstall { targets }) => {
             install::uninstall_mode(&targets)
+        }
+        Some(Commands::Register { key }) => {
+            register::register_mode(key.as_deref(), &config).await
         }
         None => {
             if !cli.shell_args.is_empty() {
