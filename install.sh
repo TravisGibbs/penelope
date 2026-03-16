@@ -2,13 +2,12 @@
 set -euo pipefail
 
 # Penelope — one-command installer
-# curl -fsSL https://raw.githubusercontent.com/<user>/penelope/main/install.sh | bash
+# curl -fsSL https://raw.githubusercontent.com/TravisGibbs/penelope/main/install.sh | bash
 # Or with targets: curl ... | bash -s -- codex
 # Or both:         curl ... | bash -s -- all
 
-REPO_URL="${PENELOPE_REPO:-https://github.com/TravisGibbs/penelope.git}"
+REPO="TravisGibbs/penelope"
 INSTALL_DIR="${PENELOPE_INSTALL_DIR:-$HOME/.penelope/bin}"
-SRC_DIR="${PENELOPE_SRC_DIR:-$HOME/.penelope/src}"
 TARGETS="${1:-claude}"
 
 GREEN='\033[0;32m'
@@ -25,45 +24,59 @@ echo ""
 echo -e "${BOLD}penelope${NC} — CLI proxy for screening agent commands"
 echo ""
 
-# ── Prerequisites ──────────────────────────────────────────────────
+# ── Detect platform ───────────────────────────────────────────────
 
-if ! command -v git &>/dev/null; then
-    error "git is required but not found"
-fi
+OS="$(uname -s)"
+ARCH="$(uname -m)"
 
-# Install Rust if missing
-if ! command -v cargo &>/dev/null; then
-    info "Rust not found — installing via rustup..."
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --quiet
-    source "$HOME/.cargo/env"
-    if ! command -v cargo &>/dev/null; then
-        error "Rust installation failed. Install manually from https://rustup.rs"
-    fi
-    info "Rust installed"
-fi
+case "$OS" in
+    Darwin) PLATFORM="apple-darwin" ;;
+    Linux)  PLATFORM="unknown-linux-gnu" ;;
+    *)      error "Unsupported OS: $OS" ;;
+esac
 
-# ── Clone / update source ─────────────────────────────────────────
+case "$ARCH" in
+    x86_64|amd64)  TARGET="x86_64-$PLATFORM" ;;
+    arm64|aarch64) TARGET="aarch64-$PLATFORM" ;;
+    *)             error "Unsupported architecture: $ARCH" ;;
+esac
 
-if [ -d "$SRC_DIR/.git" ]; then
-    info "Updating source..."
-    git -C "$SRC_DIR" pull --quiet 2>/dev/null || true
+# ── Try prebuilt binary first ─────────────────────────────────────
+
+RELEASE_URL="https://github.com/$REPO/releases/latest/download/penelope-$TARGET.tar.gz"
+INSTALLED=false
+
+info "Checking for prebuilt binary ($TARGET)..."
+if curl -fsSL --head "$RELEASE_URL" &>/dev/null; then
+    info "Downloading prebuilt binary..."
+    mkdir -p "$INSTALL_DIR"
+    curl -fsSL "$RELEASE_URL" | tar xz -C "$INSTALL_DIR"
+    chmod +x "$INSTALL_DIR/penelope"
+    INSTALLED=true
+    info "Installed prebuilt binary to $INSTALL_DIR/penelope"
 else
-    info "Cloning penelope..."
-    rm -rf "$SRC_DIR"
-    git clone --quiet --depth 1 "$REPO_URL" "$SRC_DIR"
+    warn "No prebuilt binary found — building from source"
 fi
 
-# ── Build ──────────────────────────────────────────────────────────
+# ── Fallback: build from source ───────────────────────────────────
 
-info "Building (release)..."
-cargo build --release --manifest-path "$SRC_DIR/Cargo.toml" 2>&1 | tail -1
+if [ "$INSTALLED" = false ]; then
+    # Install Rust if missing
+    if ! command -v cargo &>/dev/null; then
+        info "Rust not found — installing via rustup..."
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --quiet
+        source "$HOME/.cargo/env"
+        if ! command -v cargo &>/dev/null; then
+            error "Rust installation failed. Install manually from https://rustup.rs"
+        fi
+        info "Rust installed"
+    fi
 
-# ── Install binary ─────────────────────────────────────────────────
-
-mkdir -p "$INSTALL_DIR"
-cp "$SRC_DIR/target/release/penelope" "$INSTALL_DIR/penelope"
-chmod +x "$INSTALL_DIR/penelope"
-info "Installed to $INSTALL_DIR/penelope"
+    info "Installing from source (this takes ~30s)..."
+    cargo install --git "https://github.com/$REPO.git" --bin penelope --root "$HOME/.penelope" 2>&1 | tail -3
+    INSTALLED=true
+    info "Built and installed to $INSTALL_DIR/penelope"
+fi
 
 # ── Add to PATH ────────────────────────────────────────────────────
 
