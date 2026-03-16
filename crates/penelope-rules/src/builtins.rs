@@ -171,7 +171,12 @@ pub fn builtin_allow_rules() -> Vec<Rule> {
         },
         Rule {
             name: "penelope-self".into(),
-            pattern: r"penelope\s+(install|uninstall|check|hook)".into(),
+            pattern: r"penelope\s+(install|uninstall|check|hook|on|off|register)".into(),
+            reason: None,
+        },
+        Rule {
+            name: "process-management".into(),
+            pattern: r"^(pkill|pgrep|kill|killall|ps|jobs|fg|bg|wait|lsof)\s".into(),
             reason: None,
         },
         Rule {

@@ -72,6 +72,10 @@ enum Commands {
         #[arg(long)]
         key: Option<String>,
     },
+    /// Enable penelope screening (creates/restores hook)
+    On,
+    /// Disable penelope screening (removes hook, pass-through)
+    Off,
 }
 
 #[tokio::main]
@@ -166,6 +170,12 @@ async fn main() -> ExitCode {
         }
         Some(Commands::Register { key }) => {
             register::register_mode(key.as_deref(), &config).await
+        }
+        Some(Commands::On) => {
+            install::install_mode(&[])
+        }
+        Some(Commands::Off) => {
+            install::uninstall_mode(&[])
         }
         None => {
             if !cli.shell_args.is_empty() {
