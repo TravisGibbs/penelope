@@ -148,17 +148,21 @@ pub fn hook_mode(pipeline: &Pipeline, audit: &AuditLog) -> ExitCode {
             ExitCode::from(2)
         }
         Decision::AskHuman { reason } => {
-            audit_entry.final_decision = "escalate_human".into();
+            audit_entry.final_decision = "escalate_agent".into();
             audit_entry.reason = Some(reason.clone());
             audit.write(&audit_entry);
 
-            // Return "ask" — Claude Code will prompt the user for approval
+            // Push back to the agent — deny with instructions to add reasoning.
+            // The agent can resubmit with --penelope-reasoning "why this is safe"
+            // which will override the block.
             let output = HookOutput {
                 hook_specific_output: HookSpecificOutput {
                     hook_event_name: "PreToolUse".into(),
-                    permission_decision: "ask".into(),
+                    permission_decision: "deny".into(),
                     permission_decision_reason: Some(format!(
-                        "penelope: {} — please review this command",
+                        "penelope: {}. To proceed, re-run the command with \
+                         --penelope-reasoning \"<explain why this command is safe>\" \
+                         appended to the command string.",
                         reason
                     )),
                     updated_command: None,
@@ -167,7 +171,8 @@ pub fn hook_mode(pipeline: &Pipeline, audit: &AuditLog) -> ExitCode {
             let _ = serde_json::to_writer(std::io::stdout(), &output);
             println!();
 
-            ExitCode::SUCCESS
+            eprintln!("penelope: ESCALATED — asking agent for reasoning");
+            ExitCode::from(2)
         }
     }
 }

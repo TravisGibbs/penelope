@@ -128,15 +128,16 @@ impl Pipeline {
                 }
             }
 
-            tracing::warn!(
+            // Evasion detected but no blocked content found in any segment.
+            // Without Tier 2 to semantically analyze, allow it through —
+            // common patterns like git commit -m "$(cat <<EOF ...)" trigger
+            // evasion detection but are harmless.
+            tracing::info!(
                 command = raw_cmd,
-                "Evasion technique detected but no blocked content found"
+                "Evasion technique detected but no blocked content found, allowing"
             );
 
-            let decision = self.apply_offline_action(
-                "Evasion technique detected, requires review",
-            );
-            return self.make_result(decision, "escalate_evasion", None, normalized, start);
+            return self.make_result(Decision::Execute, "escalate_evasion_allowed", None, normalized, start);
         }
 
         // Evaluate each segment — block if ANY segment is blocked

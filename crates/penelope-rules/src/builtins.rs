@@ -169,6 +169,61 @@ pub fn builtin_allow_rules() -> Vec<Rule> {
             pattern: r"^(true|false|:)$".into(),
             reason: None,
         },
+        Rule {
+            name: "penelope-self".into(),
+            pattern: r"penelope\s+(install|uninstall|check|hook)".into(),
+            reason: None,
+        },
+        Rule {
+            name: "cp-mv-mkdir-touch".into(),
+            pattern: r"^(cp|mv|mkdir|touch|chmod|ln)\s".into(),
+            reason: None,
+        },
+        Rule {
+            name: "tar-zip".into(),
+            pattern: r"^(tar|zip|unzip|gzip|gunzip|bzip2|xz)\s".into(),
+            reason: None,
+        },
+        Rule {
+            name: "curl-get".into(),
+            pattern: r"^curl\s+(-[sfSLkv]+\s+)*https?://".into(),
+            reason: None,
+        },
+        Rule {
+            name: "docker-inspect".into(),
+            pattern: r"^docker\s+(ps|images|logs|inspect|stats|info|version)(\s|$)".into(),
+            reason: None,
+        },
+        Rule {
+            name: "git-write".into(),
+            pattern: r"^git\s+(add|commit|checkout|switch|merge|rebase|pull|push|stash|restore|rm|mv|clone|init|config)(\s|$)".into(),
+            reason: None,
+        },
+        Rule {
+            name: "pip-install".into(),
+            pattern: r"^pip[23]?\s+install\s".into(),
+            reason: None,
+        },
+        Rule {
+            name: "npm-install".into(),
+            pattern: r"^(npm|yarn|pnpm)\s+install(\s|$)".into(),
+            reason: None,
+        },
+        Rule {
+            name: "cargo-install".into(),
+            pattern: r"^cargo\s+install\s".into(),
+            reason: None,
+        },
+        Rule {
+            name: "sed-awk-sort".into(),
+            pattern: r"^(sed|awk|sort|uniq|cut|tr|tee|xargs|diff|patch|jq|yq)\s".into(),
+            reason: None,
+        },
+        Rule {
+            name: "gh-cli".into(),
+            pattern: r"^gh\s".into(),
+            reason: None,
+        },
     ]
 }
 
