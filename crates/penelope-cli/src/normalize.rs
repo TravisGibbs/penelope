@@ -5,6 +5,8 @@ use std::sync::LazyLock;
 #[derive(Debug, Clone)]
 pub struct NormalizedCommand {
     pub original: String,
+    /// The command with --penelope-reasoning stripped out (ready for execution)
+    pub stripped: String,
     /// Individual command segments after splitting on ;, &&, ||, |
     pub segments: Vec<String>,
     /// Whether eval was detected
@@ -17,6 +19,8 @@ pub struct NormalizedCommand {
     pub has_nested_shell: bool,
     /// Any decoded base64 payloads found
     pub decoded_payloads: Vec<String>,
+    /// Agent-provided reasoning for why this command is safe (from --penelope-reasoning)
+    pub reasoning: Option<String>,
 }
 
 impl NormalizedCommand {
@@ -55,6 +59,11 @@ static NESTED_SHELL_EXTRACT_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"\b(?:ba)?sh\s+-c\s+(?:["'](.+?)["']|(\S+))"#).unwrap()
 });
 
+static REASONING_RE: LazyLock<Regex> = LazyLock::new(|| {
+    // Match --penelope-reasoning "..." or --penelope-reasoning '...' or --penelope-reasoning word
+    Regex::new(r#"--penelope-reasoning\s+(?:"([^"]+)"|'([^']+)'|(\S+))"#).unwrap()
+});
+
 static BACKSLASH_ESCAPE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\\(.)").unwrap()
 });
@@ -68,6 +77,18 @@ static BASE64_LITERAL_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// Normalize a raw command string for evaluation.
 pub fn normalize(raw: &str) -> NormalizedCommand {
     let trimmed = raw.trim();
+
+    // Extract --penelope-reasoning before any other processing
+    let reasoning = REASONING_RE.captures(trimmed).and_then(|cap| {
+        cap.get(1)
+            .or_else(|| cap.get(2))
+            .or_else(|| cap.get(3))
+            .map(|m| m.as_str().to_string())
+    });
+
+    // Strip --penelope-reasoning from the command for evaluation and execution
+    let stripped = REASONING_RE.replace(trimmed, "").trim().to_string();
+    let trimmed = stripped.as_str();
 
     // Detect evasion techniques on the full command
     let has_eval = EVAL_RE.is_match(trimmed);
@@ -125,12 +146,14 @@ pub fn normalize(raw: &str) -> NormalizedCommand {
 
     NormalizedCommand {
         original: raw.to_string(),
+        stripped,
         segments,
         has_eval,
         has_substitution,
         has_base64,
         has_nested_shell,
         decoded_payloads,
+        reasoning,
     }
 }
 
@@ -256,5 +279,34 @@ mod tests {
         let n = normalize("git status");
         assert!(!n.has_evasion());
         assert_eq!(n.segments, vec!["git status"]);
+    }
+
+    #[test]
+    fn extracts_reasoning_double_quotes() {
+        let n = normalize("rm -rf /tmp/build --penelope-reasoning \"Cleaning build artifacts\"");
+        assert_eq!(n.reasoning.as_deref(), Some("Cleaning build artifacts"));
+        assert_eq!(n.stripped, "rm -rf /tmp/build");
+        assert!(!n.segments.iter().any(|s| s.contains("penelope")));
+    }
+
+    #[test]
+    fn extracts_reasoning_single_quotes() {
+        let n = normalize("git push --force --penelope-reasoning 'Rebased branch'");
+        assert_eq!(n.reasoning.as_deref(), Some("Rebased branch"));
+        assert_eq!(n.stripped, "git push --force");
+    }
+
+    #[test]
+    fn extracts_reasoning_unquoted() {
+        let n = normalize("rm -rf /tmp --penelope-reasoning cleanup");
+        assert_eq!(n.reasoning.as_deref(), Some("cleanup"));
+        assert_eq!(n.stripped, "rm -rf /tmp");
+    }
+
+    #[test]
+    fn no_reasoning_returns_none() {
+        let n = normalize("ls -la");
+        assert!(n.reasoning.is_none());
+        assert_eq!(n.stripped, "ls -la");
     }
 }

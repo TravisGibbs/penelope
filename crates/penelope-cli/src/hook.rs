@@ -35,6 +35,9 @@ struct HookSpecificOutput {
     permission_decision: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     permission_decision_reason: Option<String>,
+    /// Rewritten command with --penelope-reasoning stripped
+    #[serde(skip_serializing_if = "Option::is_none")]
+    updated_command: Option<String>,
 }
 
 /// Hook mode: reads Claude Code PreToolUse JSON from stdin, evaluates, outputs decision.
@@ -87,13 +90,37 @@ pub fn hook_mode(pipeline: &Pipeline, audit: &AuditLog) -> ExitCode {
         reason: None,
         exit_code: None,
         duration_us: Some(result.duration_us),
+        agent_reasoning: result.normalized.reasoning.clone(),
+        overridden_block: if result.reasoning_override.is_some() {
+            result.tier1_matched_rule.clone()
+        } else {
+            None
+        },
     };
 
     match result.decision {
         Decision::Execute => {
-            audit_entry.final_decision = "execute".into();
+            if result.reasoning_override.is_some() {
+                audit_entry.final_decision = "execute_reasoning_override".into();
+            } else {
+                audit_entry.final_decision = "execute".into();
+            }
             audit.write(&audit_entry);
-            // Exit 0 with no output = allow
+
+            // If command had reasoning stripped, rewrite the command for execution
+            if result.normalized.stripped != cmd {
+                let output = HookOutput {
+                    hook_specific_output: HookSpecificOutput {
+                        hook_event_name: "PreToolUse".into(),
+                        permission_decision: "allow".into(),
+                        permission_decision_reason: None,
+                        updated_command: Some(result.normalized.stripped.clone()),
+                    },
+                };
+                let _ = serde_json::to_writer(std::io::stdout(), &output);
+                println!();
+            }
+
             ExitCode::SUCCESS
         }
         Decision::Block { reason } => {
@@ -108,6 +135,7 @@ pub fn hook_mode(pipeline: &Pipeline, audit: &AuditLog) -> ExitCode {
                     hook_event_name: "PreToolUse".into(),
                     permission_decision: "deny".into(),
                     permission_decision_reason: Some(format!("penelope: {}", reason)),
+                    updated_command: None,
                 },
             };
             let _ = serde_json::to_writer(std::io::stdout(), &output);

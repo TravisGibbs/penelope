@@ -17,6 +17,12 @@ pub struct AuditEntry {
     pub exit_code: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_us: Option<u64>,
+    /// Agent-provided reasoning that overrode a block
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_reasoning: Option<String>,
+    /// The original block reason before reasoning override
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overridden_block: Option<String>,
 }
 
 pub struct AuditLog {

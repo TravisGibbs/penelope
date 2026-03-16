@@ -109,11 +109,17 @@ fn main() -> ExitCode {
             let result = pipeline.evaluate(&cmd);
             match result.decision {
                 pipeline::Decision::Execute => {
-                    println!("ALLOW: command would be permitted");
+                    if let Some(ref reasoning) = result.reasoning_override {
+                        println!("ALLOW (reasoning override): command would be permitted");
+                        println!("  Reasoning: {}", reasoning);
+                        println!("  Stripped command: {}", result.normalized.stripped);
+                    } else {
+                        println!("ALLOW: command would be permitted");
+                    }
                     println!("  Tier 1: {}", result.tier1_verdict);
                     println!("  Segments: {:?}", result.normalized.segments);
                     if result.normalized.has_evasion() {
-                        println!("  ⚠ Evasion techniques detected");
+                        println!("  Evasion techniques detected");
                     }
                     println!("  Evaluation time: {}μs", result.duration_us);
                     ExitCode::SUCCESS

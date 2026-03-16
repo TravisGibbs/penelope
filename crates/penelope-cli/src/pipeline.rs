@@ -18,6 +18,8 @@ pub struct EvalResult {
     pub normalized: NormalizedCommand,
     pub tier1_verdict: String,
     pub tier1_matched_rule: Option<String>,
+    /// Agent-provided reasoning that overrode a block (if any)
+    pub reasoning_override: Option<String>,
     pub duration_us: u64,
 }
 
@@ -42,7 +44,33 @@ impl Pipeline {
     pub fn evaluate(&self, raw_cmd: &str) -> EvalResult {
         let start = Instant::now();
         let normalized = normalize::normalize(raw_cmd);
+        let has_reasoning = normalized.reasoning.is_some();
 
+        let mut result = self.evaluate_inner(&normalized, raw_cmd, start);
+
+        // If agent provided reasoning, override blocks → allow
+        if has_reasoning {
+            if let Decision::Block { ref reason } = result.decision {
+                tracing::info!(
+                    command = raw_cmd,
+                    reasoning = normalized.reasoning.as_deref().unwrap_or(""),
+                    original_block = reason.as_str(),
+                    "Block overridden by agent reasoning"
+                );
+                result.reasoning_override = normalized.reasoning.clone();
+                result.decision = Decision::Execute;
+            }
+        }
+
+        result
+    }
+
+    fn evaluate_inner(
+        &self,
+        normalized: &NormalizedCommand,
+        raw_cmd: &str,
+        start: Instant,
+    ) -> EvalResult {
         // If evasion was detected, be conservative
         if normalized.has_evasion() {
             // Evaluate all segments (including decoded payloads) against Tier 1
@@ -55,7 +83,8 @@ impl Pipeline {
                         },
                         tier1_verdict: "block".into(),
                         tier1_matched_rule: Some(reason),
-                        normalized,
+                        reasoning_override: None,
+                        normalized: normalized.clone(),
                         duration_us: start.elapsed().as_micros() as u64,
                     };
                 }
@@ -78,14 +107,14 @@ impl Pipeline {
                 },
                 tier1_verdict: "escalate_evasion".into(),
                 tier1_matched_rule: None,
-                normalized,
+                reasoning_override: None,
+                normalized: normalized.clone(),
                 duration_us: start.elapsed().as_micros() as u64,
             };
         }
 
         // Evaluate each segment — block if ANY segment is blocked
         let mut worst_verdict = Verdict::Allow;
-        let block_reason: Option<String> = None;
 
         for segment in &normalized.segments {
             match self.tier1.evaluate(segment) {
@@ -96,7 +125,8 @@ impl Pipeline {
                         },
                         tier1_verdict: "block".into(),
                         tier1_matched_rule: Some(reason),
-                        normalized,
+                        reasoning_override: None,
+                        normalized: normalized.clone(),
                         duration_us: start.elapsed().as_micros() as u64,
                     };
                 }
@@ -132,8 +162,9 @@ impl Pipeline {
         EvalResult {
             decision,
             tier1_verdict: verdict_str.into(),
-            tier1_matched_rule: block_reason.map(|r: String| r),
-            normalized,
+            tier1_matched_rule: None,
+            reasoning_override: None,
+            normalized: normalized.clone(),
             duration_us: start.elapsed().as_micros() as u64,
         }
     }
@@ -185,5 +216,31 @@ mod tests {
         let r = p.evaluate("bash -c 'rm -rf /'");
         // The inner command should be caught
         assert!(matches!(r.decision, Decision::Block { .. }));
+    }
+
+    #[test]
+    fn reasoning_overrides_block() {
+        let p = pipeline();
+        let r = p.evaluate("rm -rf / --penelope-reasoning \"Cleaning up test environment\"");
+        assert!(matches!(r.decision, Decision::Execute));
+        assert!(r.reasoning_override.is_some());
+        assert_eq!(r.reasoning_override.unwrap(), "Cleaning up test environment");
+    }
+
+    #[test]
+    fn reasoning_strips_from_segments() {
+        let p = pipeline();
+        let r = p.evaluate("git push --force --penelope-reasoning 'Rebased feature branch'");
+        assert!(matches!(r.decision, Decision::Execute));
+        // The --penelope-reasoning should not appear in segments
+        assert!(!r.normalized.segments.iter().any(|s| s.contains("penelope-reasoning")));
+    }
+
+    #[test]
+    fn no_reasoning_still_blocks() {
+        let p = pipeline();
+        let r = p.evaluate("rm -rf /");
+        assert!(matches!(r.decision, Decision::Block { .. }));
+        assert!(r.reasoning_override.is_none());
     }
 }

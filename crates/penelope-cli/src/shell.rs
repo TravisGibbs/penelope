@@ -49,6 +49,9 @@ pub fn evaluate_and_exec(
     let session_id = get_or_create_session_id();
     let result = pipeline.evaluate(cmd);
 
+    // Use the stripped command (without --penelope-reasoning) for execution
+    let stripped_cmd = &result.normalized.stripped;
+
     let mut audit_entry = AuditEntry {
         ts: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         session_id,
@@ -61,6 +64,12 @@ pub fn evaluate_and_exec(
         reason: None,
         exit_code: None,
         duration_us: Some(result.duration_us),
+        agent_reasoning: result.normalized.reasoning.clone(),
+        overridden_block: if result.reasoning_override.is_some() {
+            result.tier1_matched_rule.clone()
+        } else {
+            None
+        },
     };
 
     match result.decision {
@@ -74,12 +83,27 @@ pub fn evaluate_and_exec(
             ExitCode::from(126)
         }
         Decision::Execute => {
-            audit_entry.final_decision = "execute".into();
+            if result.reasoning_override.is_some() {
+                audit_entry.final_decision = "execute_reasoning_override".into();
+            } else {
+                audit_entry.final_decision = "execute".into();
+            }
             audit.write(&audit_entry);
+
+            // Build shell args with the stripped command (no --penelope-reasoning)
+            let exec_args: Vec<String> = if stripped_cmd != cmd {
+                // Replace the command in -c args with the stripped version
+                original_args
+                    .iter()
+                    .map(|a| if a == cmd { stripped_cmd.clone() } else { a.clone() })
+                    .collect()
+            } else {
+                original_args.to_vec()
+            };
 
             // Execute the command via the real shell
             let status = std::process::Command::new(real_shell)
-                .args(original_args)
+                .args(&exec_args)
                 .status();
 
             match status {
