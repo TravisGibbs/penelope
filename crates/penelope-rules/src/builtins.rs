@@ -1,0 +1,187 @@
+use crate::rules::Rule;
+
+/// Built-in block rules for catastrophic commands.
+pub fn builtin_block_rules() -> Vec<Rule> {
+    vec![
+        Rule {
+            name: "recursive-force-delete-root".into(),
+            pattern: r"rm\s+(-[a-zA-Z]*r[a-zA-Z]*f|-[a-zA-Z]*f[a-zA-Z]*r|--recursive\s+--force|--force\s+--recursive)\s+/\s*$".into(),
+            reason: Some("Recursive force delete on root filesystem".into()),
+        },
+        Rule {
+            name: "rm-rf-slash".into(),
+            pattern: r"rm\s+(-[a-zA-Z]*r[a-zA-Z]*f|-[a-zA-Z]*f[a-zA-Z]*r)\s+/[^/\s]*/?\.\.\s*$".into(),
+            reason: Some("Path traversal in rm command".into()),
+        },
+        Rule {
+            name: "drop-table".into(),
+            pattern: r"(?i)DROP\s+(TABLE|DATABASE|SCHEMA|INDEX)\s".into(),
+            reason: Some("SQL DROP statement".into()),
+        },
+        Rule {
+            name: "truncate-table".into(),
+            pattern: r"(?i)TRUNCATE\s+TABLE\s".into(),
+            reason: Some("SQL TRUNCATE statement".into()),
+        },
+        Rule {
+            name: "curl-to-shell".into(),
+            pattern: r"curl\s.*\|\s*(ba)?sh".into(),
+            reason: Some("Piping remote content to shell".into()),
+        },
+        Rule {
+            name: "wget-to-shell".into(),
+            pattern: r"wget\s.*\|\s*(ba)?sh".into(),
+            reason: Some("Piping remote content to shell".into()),
+        },
+        Rule {
+            name: "mkfs".into(),
+            pattern: r"mkfs\.\w+\s+/dev/".into(),
+            reason: Some("Formatting a disk device".into()),
+        },
+        Rule {
+            name: "dd-of-device".into(),
+            pattern: r"dd\s+.*of=/dev/[sh]d".into(),
+            reason: Some("Writing directly to disk device with dd".into()),
+        },
+        Rule {
+            name: "chmod-777-recursive".into(),
+            pattern: r"chmod\s+(-[a-zA-Z]*R[a-zA-Z]*\s+)?777\s+/".into(),
+            reason: Some("Recursive chmod 777 on system path".into()),
+        },
+        Rule {
+            name: "fork-bomb".into(),
+            pattern: r":\(\)\s*\{\s*:\|:\s*&\s*\}\s*;?\s*:".into(),
+            reason: Some("Fork bomb detected".into()),
+        },
+        Rule {
+            name: "etc-passwd-write".into(),
+            pattern: r">\s*/etc/(passwd|shadow|sudoers)".into(),
+            reason: Some("Writing to critical auth file".into()),
+        },
+        Rule {
+            name: "iptables-flush".into(),
+            pattern: r"iptables\s+-F".into(),
+            reason: Some("Flushing all firewall rules".into()),
+        },
+        Rule {
+            name: "systemctl-disable-firewall".into(),
+            pattern: r"systemctl\s+(stop|disable)\s+(firewalld|ufw|iptables)".into(),
+            reason: Some("Disabling system firewall".into()),
+        },
+        Rule {
+            name: "curl-exfil-post".into(),
+            pattern: r"curl\s+.*-[a-zA-Z]*X\s*POST.*(-d|--data)\s".into(),
+            reason: Some("Potential data exfiltration via curl POST".into()),
+        },
+        Rule {
+            name: "nc-reverse-shell".into(),
+            pattern: r"(nc|ncat|netcat)\s+.*-e\s+/(bin|usr)/(ba)?sh".into(),
+            reason: Some("Reverse shell via netcat".into()),
+        },
+        Rule {
+            name: "python-reverse-shell".into(),
+            pattern: r"python[23]?\s+-c\s+.*socket.*connect".into(),
+            reason: Some("Reverse shell via Python".into()),
+        },
+        Rule {
+            name: "shutdown-reboot".into(),
+            pattern: r"(shutdown|reboot|halt|poweroff)\s".into(),
+            reason: Some("System shutdown/reboot command".into()),
+        },
+        Rule {
+            name: "kill-all".into(),
+            pattern: r"(killall|pkill)\s+-9\s".into(),
+            reason: Some("Force killing processes".into()),
+        },
+        Rule {
+            name: "git-force-push".into(),
+            pattern: r"git\s+push\s+.*--force".into(),
+            reason: Some("Force pushing to git remote".into()),
+        },
+        Rule {
+            name: "git-reset-hard".into(),
+            pattern: r"git\s+reset\s+--hard".into(),
+            reason: Some("Hard reset of git history".into()),
+        },
+    ]
+}
+
+/// Built-in allow rules for known-safe commands.
+pub fn builtin_allow_rules() -> Vec<Rule> {
+    vec![
+        Rule {
+            name: "git-read-only".into(),
+            pattern: r"^git\s+(status|log|diff|branch|show|remote|fetch|tag|stash\s+list|rev-parse|describe)(\s|$)".into(),
+            reason: None,
+        },
+        Rule {
+            name: "ls-family".into(),
+            pattern: r"^(ls|ll|la|dir|tree|exa|eza)(\s|$)".into(),
+            reason: None,
+        },
+        Rule {
+            name: "file-inspection".into(),
+            pattern: r"^(cat|head|tail|less|more|wc|file|stat|md5|sha256sum|shasum)(\s|$)".into(),
+            reason: None,
+        },
+        Rule {
+            name: "search-tools".into(),
+            pattern: r"^(find|fd|rg|grep|ag|ack|which|where|type|whereis|locate)(\s|$)".into(),
+            reason: None,
+        },
+        Rule {
+            name: "echo-printf".into(),
+            pattern: r"^(echo|printf)(\s|$)".into(),
+            reason: None,
+        },
+        Rule {
+            name: "env-inspection".into(),
+            pattern: r"^(env|printenv|set|export|whoami|id|hostname|uname|date|uptime|df|du|free|top|ps|pwd)(\s|$)".into(),
+            reason: None,
+        },
+        Rule {
+            name: "cargo-read".into(),
+            pattern: r"^cargo\s+(check|test|clippy|doc|bench|build|run|fmt|tree|metadata)(\s|$)".into(),
+            reason: None,
+        },
+        Rule {
+            name: "npm-yarn-read".into(),
+            pattern: r"^(npm|yarn|pnpm)\s+(test|run|build|lint|check|list|ls|outdated|info|why)(\s|$)".into(),
+            reason: None,
+        },
+        Rule {
+            name: "python-tools".into(),
+            pattern: r"^(python[23]?|pip|pytest|mypy|ruff|black|isort|flake8)\s".into(),
+            reason: None,
+        },
+        Rule {
+            name: "make".into(),
+            pattern: r"^make(\s|$)".into(),
+            reason: None,
+        },
+        Rule {
+            name: "cd".into(),
+            pattern: r"^cd(\s|$)".into(),
+            reason: None,
+        },
+        Rule {
+            name: "true-false-noop".into(),
+            pattern: r"^(true|false|:)$".into(),
+            reason: None,
+        },
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use regex::Regex;
+
+    #[test]
+    fn all_builtin_patterns_compile() {
+        for rule in builtin_block_rules().iter().chain(builtin_allow_rules().iter()) {
+            Regex::new(&rule.pattern)
+                .unwrap_or_else(|e| panic!("Rule '{}' has invalid pattern: {}", rule.name, e));
+        }
+    }
+}

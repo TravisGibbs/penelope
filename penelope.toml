@@ -1,0 +1,28 @@
+[general]
+# The real shell to delegate to after screening
+# real_shell = "/bin/bash"
+# log_file = "~/.penelope/audit.jsonl"
+# log_level = "info"
+# session_context_size = 20
+
+# Additional block rules (supplements built-in rules)
+# [[tier1.block]]
+# name = "custom-block"
+# pattern = "some_dangerous_pattern"
+# reason = "Why this is blocked"
+
+# Additional allow rules (supplements built-in rules)
+# [[tier1.allow]]
+# name = "custom-allow"
+# pattern = "^my-safe-tool\\s"
+
+[tier2]
+# socket_path = "/tmp/penelope-sidecar.sock"
+# timeout_ms = 100
+# timeout_action = "allow"  # allow | block | prompt
+# sidecar_auto_start = true
+
+[human_in_the_loop]
+# enabled = true
+# timeout_seconds = 30
+# default_action = "deny"  # deny | allow

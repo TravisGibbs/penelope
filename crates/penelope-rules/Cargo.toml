@@ -1,0 +1,9 @@
+[package]
+name = "penelope-rules"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+regex = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
