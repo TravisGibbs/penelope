@@ -28,6 +28,9 @@ pub struct EvalResult {
     pub tier2_confidence: Option<f64>,
     pub tier2_reasoning: Option<String>,
     pub tier2_latency_us: Option<u64>,
+    /// True if Tier 2 evaluated the agent's reasoning and still blocked.
+    /// When this is set, reasoning cannot override the block.
+    pub tier2_reasoning_rejected: bool,
     pub duration_us: u64,
 }
 
@@ -54,17 +57,33 @@ impl Pipeline {
 
         let mut result = self.evaluate_inner(&normalized, raw_cmd, start);
 
-        // If agent provided reasoning, override blocks → allow
+        // If agent provided reasoning, attempt to override blocks.
+        // Tier 1 blocks are overridable by reasoning (agent explains why it's safe).
+        // Tier 2 blocks (when wired up) will re-evaluate with reasoning as context
+        // and can reject the override — indicated by tier2_reasoning_rejected.
         if has_reasoning {
             if let Decision::Block { ref reason } = result.decision {
-                tracing::info!(
-                    command = raw_cmd,
-                    reasoning = normalized.reasoning.as_deref().unwrap_or(""),
-                    original_block = reason.as_str(),
-                    "Block overridden by agent reasoning"
-                );
-                result.reasoning_override = normalized.reasoning.clone();
-                result.decision = Decision::Execute;
+                if result.tier2_reasoning_rejected {
+                    // Tier 2 saw the reasoning and still said block — hard block.
+                    tracing::warn!(
+                        command = raw_cmd,
+                        reasoning = normalized.reasoning.as_deref().unwrap_or(""),
+                        original_block = reason.as_str(),
+                        "Agent reasoning rejected by Tier 2, maintaining block"
+                    );
+                    // Keep the block, but record that reasoning was provided
+                    result.reasoning_override = normalized.reasoning.clone();
+                } else {
+                    // No Tier 2 rejection — reasoning overrides the block
+                    tracing::info!(
+                        command = raw_cmd,
+                        reasoning = normalized.reasoning.as_deref().unwrap_or(""),
+                        original_block = reason.as_str(),
+                        "Block overridden by agent reasoning"
+                    );
+                    result.reasoning_override = normalized.reasoning.clone();
+                    result.decision = Decision::Execute;
+                }
             }
         }
 
@@ -101,6 +120,7 @@ impl Pipeline {
             tier2_confidence: None,
             tier2_reasoning: None,
             tier2_latency_us: None,
+            tier2_reasoning_rejected: false,
             normalized: normalized.clone(),
             duration_us: start.elapsed().as_micros() as u64,
         }
