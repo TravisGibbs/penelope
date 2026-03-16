@@ -2,7 +2,7 @@ use penelope_rules::{Tier1Engine, Verdict};
 use std::time::Instant;
 
 use crate::normalize::{self, NormalizedCommand};
-use crate::tier2::{ClassifyRequest, OfflineAction, Tier2Client};
+use crate::tier2::{ClassifyRequest, EscalationTarget, OfflineAction, Tier2Client};
 
 /// The final decision after evaluating a command.
 #[derive(Debug)]
@@ -157,14 +157,25 @@ impl Pipeline {
 
             match tier2.classify(&req).await {
                 Ok(tier2_result) => {
+                    let reason_str = format!(
+                        "Tier 2 classified as {} (confidence: {:.0}%): {}",
+                        tier2_result.risk_level,
+                        tier2_result.confidence * 100.0,
+                        tier2_result.reasoning
+                    );
+
                     let decision = if tier2_result.risk_level.should_block() {
-                        Decision::Block {
-                            reason: format!(
-                                "Tier 2 classified as {} (confidence: {:.0}%): {}",
-                                tier2_result.risk_level,
-                                tier2_result.confidence * 100.0,
-                                tier2_result.reasoning
-                            ),
+                        // Model says block — route to the escalation target
+                        match tier2_result.escalation_target {
+                            EscalationTarget::Human => Decision::AskHuman {
+                                reason: reason_str,
+                            },
+                            EscalationTarget::Agent => Decision::Block {
+                                reason: reason_str,
+                            },
+                            EscalationTarget::None => Decision::Block {
+                                reason: reason_str,
+                            },
                         }
                     } else {
                         Decision::Execute

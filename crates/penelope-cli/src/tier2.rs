@@ -41,12 +41,41 @@ pub struct ClassifyRequest {
     pub tier1_verdict: String,
 }
 
+/// Who should handle escalation feedback.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum EscalationTarget {
+    /// Ask the agent to explain via --penelope-reasoning
+    Agent,
+    /// Hard escalate to the human user
+    Human,
+    /// No escalation needed (allow or hard block)
+    None,
+}
+
+impl std::fmt::Display for EscalationTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EscalationTarget::Agent => write!(f, "agent"),
+            EscalationTarget::Human => write!(f, "human"),
+            EscalationTarget::None => write!(f, "none"),
+        }
+    }
+}
+
 /// Response from the NLI classification endpoint.
 #[derive(Debug, Deserialize)]
 pub struct ClassifyResponse {
     pub risk_level: RiskLevel,
     pub confidence: f64,
     pub reasoning: String,
+    /// Who should handle this if escalated: "agent", "human", or "none"
+    #[serde(default = "default_escalation_target")]
+    pub escalation_target: EscalationTarget,
+}
+
+fn default_escalation_target() -> EscalationTarget {
+    EscalationTarget::Agent
 }
 
 /// Result of a Tier 2 evaluation.
@@ -58,6 +87,8 @@ pub struct Tier2Result {
     pub latency_us: u64,
     /// Whether the model rejected agent-provided reasoning.
     pub reasoning_rejected: bool,
+    /// Who should handle escalation feedback.
+    pub escalation_target: EscalationTarget,
 }
 
 /// What to do when the NLI model is unavailable.
@@ -150,6 +181,7 @@ impl Tier2Client {
             reasoning: body.reasoning,
             latency_us,
             reasoning_rejected,
+            escalation_target: body.escalation_target,
         })
     }
 }
