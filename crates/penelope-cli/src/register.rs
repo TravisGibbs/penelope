@@ -10,21 +10,19 @@ pub async fn register_mode(key: Option<&str>, config: &Config) -> ExitCode {
     }
 
     // OAuth flow: open browser to the API's /auth/github endpoint
-    let api_base = match config.remote.endpoint.as_ref() {
-        Some(endpoint) => {
-            // Strip /api/v1/events to get the base URL
+    const DEFAULT_API_BASE: &str = "https://penelope-api.onrender.com";
+
+    let api_base = config
+        .remote
+        .endpoint
+        .as_ref()
+        .map(|endpoint| {
             endpoint
                 .trim_end_matches('/')
                 .trim_end_matches("/api/v1/events")
                 .to_string()
-        }
-        None => {
-            eprintln!("penelope: no remote API endpoint configured.");
-            eprintln!("penelope: set [remote] endpoint in your config, or use:");
-            eprintln!("  penelope register --key <your-api-key>");
-            return ExitCode::from(1);
-        }
-    };
+        })
+        .unwrap_or_else(|| DEFAULT_API_BASE.to_string());
 
     let auth_url = format!("{}/auth/github", api_base);
 
@@ -75,9 +73,9 @@ fn save_key(api_key: &str, _config: &Config) -> ExitCode {
             &format!("[remote]\napi_key = \"{}\"", api_key),
         );
     } else {
-        // Append [remote] section
+        // Append [remote] section with default endpoint
         contents.push_str(&format!(
-            "\n[remote]\napi_key = \"{}\"\nenabled = true\n",
+            "\n[remote]\nendpoint = \"https://penelope-api.onrender.com/api/v1/events\"\napi_key = \"{}\"\nenabled = true\n",
             api_key
         ));
     }
