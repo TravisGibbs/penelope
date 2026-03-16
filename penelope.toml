@@ -17,10 +17,10 @@
 # pattern = "^my-safe-tool\\s"
 
 [tier2]
-# NLI model endpoint for semantic risk classification
-# endpoint = "http://localhost:8000/classify"
-# timeout_ms = 100
-# enabled = false
+# Classification endpoint (uses TypeSafe for feature extraction)
+endpoint = "https://penelope-api.onrender.com/classify"
+timeout_ms = 5000
+enabled = false  # enable after registering with: penelope register
 
 # What to do when tier2 is unavailable and a command is escalated:
 #   "escalate" = ask the human for approval (default)

@@ -206,7 +206,7 @@ fn build_pipeline(config: &Config) -> (Pipeline, AuditLog, Option<RemoteLogger>)
         std::process::exit(1);
     });
 
-    let tier2 = Tier2Client::new(&config.tier2);
+    let tier2 = Tier2Client::new(&config.tier2, &config.remote);
     if tier2.is_some() {
         tracing::info!("Tier 2 NLI classifier enabled");
     }

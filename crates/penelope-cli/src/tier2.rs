@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
-use crate::config::Tier2Config;
+use crate::config::{RemoteConfig, Tier2Config};
 
 /// Risk level classification from the Tier 2 NLI model.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -109,16 +109,17 @@ impl OfflineAction {
     }
 }
 
-/// HTTP client for the Tier 2 NLI classification endpoint.
+/// HTTP client for the Tier 2 classification endpoint.
 pub struct Tier2Client {
     client: reqwest::Client,
     endpoint: String,
-    offline_action: OfflineAction,
+    api_key: Option<String>,
 }
 
 impl Tier2Client {
     /// Create a new client from config. Returns None if tier2 is disabled.
-    pub fn new(config: &Tier2Config) -> Option<Self> {
+    /// Uses the remote config's API key for authentication.
+    pub fn new(config: &Tier2Config, remote_config: &RemoteConfig) -> Option<Self> {
         if !config.enabled {
             return None;
         }
@@ -132,23 +133,20 @@ impl Tier2Client {
         Some(Self {
             client,
             endpoint: endpoint.clone(),
-            offline_action: OfflineAction::from_str(&config.offline_action),
+            api_key: remote_config.api_key.clone(),
         })
     }
 
-    pub fn offline_action(&self) -> &OfflineAction {
-        &self.offline_action
-    }
-
-    /// Classify a command via the NLI endpoint.
+    /// Classify a command via the classification endpoint.
     pub async fn classify(&self, req: &ClassifyRequest) -> Result<Tier2Result, Tier2Error> {
         let start = Instant::now();
 
-        let response = self
-            .client
-            .post(&self.endpoint)
-            .json(req)
-            .send()
+        let mut request = self.client.post(&self.endpoint).json(req);
+        if let Some(ref key) = self.api_key {
+            request = request.bearer_auth(key);
+        }
+
+        let response = request.send()
             .await
             .map_err(|e| {
                 if e.is_timeout() {
@@ -242,6 +240,15 @@ mod tests {
         assert!((resp.confidence - 0.92).abs() < f64::EPSILON);
     }
 
+    fn test_remote_config() -> RemoteConfig {
+        RemoteConfig {
+            endpoint: None,
+            api_key: Some("pen_test123".into()),
+            enabled: false,
+            timeout_ms: 5000,
+        }
+    }
+
     #[test]
     fn client_returns_none_when_disabled() {
         let config = Tier2Config {
@@ -250,7 +257,7 @@ mod tests {
             enabled: false,
             offline_action: "escalate".into(),
         };
-        assert!(Tier2Client::new(&config).is_none());
+        assert!(Tier2Client::new(&config, &test_remote_config()).is_none());
     }
 
     #[test]
@@ -261,7 +268,7 @@ mod tests {
             enabled: true,
             offline_action: "escalate".into(),
         };
-        assert!(Tier2Client::new(&config).is_none());
+        assert!(Tier2Client::new(&config, &test_remote_config()).is_none());
     }
 
     #[test]
@@ -272,6 +279,6 @@ mod tests {
             enabled: true,
             offline_action: "escalate".into(),
         };
-        assert!(Tier2Client::new(&config).is_some());
+        assert!(Tier2Client::new(&config, &test_remote_config()).is_some());
     }
 }
