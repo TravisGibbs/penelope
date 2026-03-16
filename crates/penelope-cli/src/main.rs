@@ -5,6 +5,7 @@ mod hook;
 mod install;
 mod normalize;
 mod pipeline;
+mod remote;
 mod session;
 mod shell;
 mod tier2;
@@ -18,7 +19,8 @@ use penelope_rules::Tier1Engine;
 use audit::AuditLog;
 use config::Config;
 use pipeline::Pipeline;
-use tier2::OfflineAction;
+use remote::RemoteLogger;
+use tier2::{OfflineAction, Tier2Client};
 
 #[derive(Parser)]
 #[command(
@@ -35,7 +37,6 @@ struct Cli {
     command: Option<Commands>,
 
     /// Arguments passed in shell mode (when used as SHELL).
-    /// Captures all trailing args like: penelope -c "command"
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     shell_args: Vec<String>,
 }
@@ -44,13 +45,11 @@ struct Cli {
 enum Commands {
     /// Execute a command through the proxy
     Exec {
-        /// The command and arguments to execute
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
     /// Check a command without executing it
     Check {
-        /// The command string to check
         #[arg(trailing_var_arg = true)]
         command: Vec<String>,
     },
@@ -58,20 +57,18 @@ enum Commands {
     Hook,
     /// Install penelope hooks into agent tools
     Install {
-        /// Targets to install: claude, codex (default: claude)
         #[arg(trailing_var_arg = true)]
         targets: Vec<String>,
     },
     /// Remove penelope hooks from agent tools
     Uninstall {
-        /// Targets to uninstall: claude, codex (default: claude)
         #[arg(trailing_var_arg = true)]
         targets: Vec<String>,
     },
 }
 
-fn main() -> ExitCode {
-    // Initialize tracing (always to stderr so stdout is clean for hook JSON output)
+#[tokio::main]
+async fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
@@ -81,34 +78,28 @@ fn main() -> ExitCode {
         .with_target(false)
         .init();
 
-    // Detect shell mode: when invoked as SHELL, first arg after binary name
-    // is typically -c followed by the command string.
     let raw_args: Vec<String> = std::env::args().collect();
-
-    // Check if we're being invoked in shell mode (e.g., -c "command")
-    // This happens before clap parsing because -c isn't a clap argument.
     let is_shell_mode = raw_args.len() >= 2 && raw_args[1] == "-c";
 
     if is_shell_mode {
         let config = Config::load(None);
-        let (pipeline, audit) = build_pipeline(&config);
+        let (pipeline, audit, remote) = build_pipeline(&config);
         let args: Vec<String> = raw_args[1..].to_vec();
-        return shell::shell_mode(&args, &config.general.real_shell, &pipeline, &audit);
+        return shell::shell_mode(&args, &config.general.real_shell, &pipeline, &audit, remote.as_ref()).await;
     }
 
-    // Normal CLI mode — use clap
     let cli = Cli::parse();
     let config_path = cli.config.as_ref().map(std::path::Path::new);
     let config = Config::load(config_path);
-    let (pipeline, audit) = build_pipeline(&config);
+    let (pipeline, audit, remote) = build_pipeline(&config);
 
     match cli.command {
         Some(Commands::Exec { command }) => {
-            exec::exec_mode(&command, &config.general.real_shell, &pipeline, &audit)
+            exec::exec_mode(&command, &config.general.real_shell, &pipeline, &audit, remote.as_ref()).await
         }
         Some(Commands::Check { command }) => {
             let cmd = command.join(" ");
-            let result = pipeline.evaluate(&cmd);
+            let result = pipeline.evaluate(&cmd).await;
             match result.decision {
                 pipeline::Decision::Execute => {
                     if let Some(ref reasoning) = result.reasoning_override {
@@ -119,6 +110,15 @@ fn main() -> ExitCode {
                         println!("ALLOW: command would be permitted");
                     }
                     println!("  Tier 1: {}", result.tier1_verdict);
+                    if let Some(ref risk) = result.tier2_risk_level {
+                        println!("  Tier 2: {} (confidence: {:.0}%)",
+                            risk,
+                            result.tier2_confidence.unwrap_or(0.0) * 100.0
+                        );
+                        if let Some(ref reasoning) = result.tier2_reasoning {
+                            println!("  Tier 2 reasoning: {}", reasoning);
+                        }
+                    }
                     println!("  Segments: {:?}", result.normalized.segments);
                     if result.normalized.has_evasion() {
                         println!("  Evasion techniques detected");
@@ -129,10 +129,13 @@ fn main() -> ExitCode {
                 pipeline::Decision::Block { reason } => {
                     println!("BLOCK: {}", reason);
                     println!("  Tier 1: {}", result.tier1_verdict);
-                    println!("  Segments: {:?}", result.normalized.segments);
-                    if result.normalized.has_evasion() {
-                        println!("  Evasion techniques detected");
+                    if let Some(ref risk) = result.tier2_risk_level {
+                        println!("  Tier 2: {} (confidence: {:.0}%)",
+                            risk,
+                            result.tier2_confidence.unwrap_or(0.0) * 100.0
+                        );
                     }
+                    println!("  Segments: {:?}", result.normalized.segments);
                     println!("  Evaluation time: {}μs", result.duration_us);
                     ExitCode::from(1)
                 }
@@ -146,7 +149,7 @@ fn main() -> ExitCode {
             }
         }
         Some(Commands::Hook) => {
-            hook::hook_mode(&pipeline, &audit)
+            hook::hook_mode(&pipeline, &audit, remote.as_ref()).await
         }
         Some(Commands::Install { targets }) => {
             install::install_mode(&targets)
@@ -155,14 +158,14 @@ fn main() -> ExitCode {
             install::uninstall_mode(&targets)
         }
         None => {
-            // If no subcommand and we have shell_args, try shell mode
             if !cli.shell_args.is_empty() {
                 shell::shell_mode(
                     &cli.shell_args,
                     &config.general.real_shell,
                     &pipeline,
                     &audit,
-                )
+                    remote.as_ref(),
+                ).await
             } else {
                 eprintln!("penelope: no command provided. Use --help for usage.");
                 ExitCode::from(1)
@@ -171,7 +174,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn build_pipeline(config: &Config) -> (Pipeline, AuditLog) {
+fn build_pipeline(config: &Config) -> (Pipeline, AuditLog, Option<RemoteLogger>) {
     let mut block_rules = builtin_block_rules();
     let mut allow_rules = builtin_allow_rules();
 
@@ -184,8 +187,18 @@ fn build_pipeline(config: &Config) -> (Pipeline, AuditLog) {
     });
 
     let offline_action = OfflineAction::from_str(&config.tier2.offline_action);
-    let pipeline = Pipeline::new(engine, offline_action);
+    let tier2 = Tier2Client::new(&config.tier2);
+    if tier2.is_some() {
+        tracing::info!("Tier 2 NLI classifier enabled");
+    }
+
+    let pipeline = Pipeline::new(engine, offline_action, tier2);
     let audit = AuditLog::new(&config.log_file_path());
 
-    (pipeline, audit)
+    let remote = RemoteLogger::new(&config.remote);
+    if remote.is_some() {
+        tracing::info!("Remote audit logging enabled");
+    }
+
+    (pipeline, audit, remote)
 }

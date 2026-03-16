@@ -21,3 +21,4 @@ chrono = { workspace = true }
 thiserror = { workspace = true }
 dirs = { workspace = true }
 regex = { workspace = true }
+reqwest = { workspace = true }

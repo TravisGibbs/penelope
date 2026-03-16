@@ -5,9 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::audit::{AuditEntry, AuditLog};
 use crate::pipeline::{Decision, Pipeline};
+use crate::remote::RemoteLogger;
 use crate::session::get_or_create_session_id;
 
-/// Input format from Claude Code PreToolUse hook (received on stdin).
 #[derive(Debug, Deserialize)]
 struct HookInput {
     tool_name: Option<String>,
@@ -21,7 +21,6 @@ struct ToolInput {
     command: Option<String>,
 }
 
-/// Output format for Claude Code hook decisions (written to stdout).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct HookOutput {
@@ -35,14 +34,15 @@ struct HookSpecificOutput {
     permission_decision: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     permission_decision_reason: Option<String>,
-    /// Rewritten command with --penelope-reasoning stripped
     #[serde(skip_serializing_if = "Option::is_none")]
     updated_command: Option<String>,
 }
 
-/// Hook mode: reads Claude Code PreToolUse JSON from stdin, evaluates, outputs decision.
-pub fn hook_mode(pipeline: &Pipeline, audit: &AuditLog) -> ExitCode {
-    // Read JSON from stdin
+pub async fn hook_mode(
+    pipeline: &Pipeline,
+    audit: &AuditLog,
+    remote: Option<&RemoteLogger>,
+) -> ExitCode {
     let mut input = String::new();
     if let Err(e) = std::io::stdin().read_to_string(&mut input) {
         eprintln!("penelope: failed to read stdin: {}", e);
@@ -57,26 +57,21 @@ pub fn hook_mode(pipeline: &Pipeline, audit: &AuditLog) -> ExitCode {
         }
     };
 
-    // Only screen Bash tool calls
     let tool_name = hook_input.tool_name.as_deref().unwrap_or("");
     if tool_name != "Bash" {
-        // Not a Bash command — allow
         return ExitCode::SUCCESS;
     }
 
     let cmd = match hook_input.tool_input.as_ref().and_then(|t| t.command.as_deref()) {
         Some(c) => c,
-        None => {
-            // No command field — allow
-            return ExitCode::SUCCESS;
-        }
+        None => return ExitCode::SUCCESS,
     };
 
     let session_id = hook_input
         .session_id
         .unwrap_or_else(get_or_create_session_id);
 
-    let result = pipeline.evaluate(cmd);
+    let result = pipeline.evaluate(cmd).await;
 
     let mut audit_entry = AuditEntry {
         ts: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -102,16 +97,14 @@ pub fn hook_mode(pipeline: &Pipeline, audit: &AuditLog) -> ExitCode {
         tier2_latency_us: result.tier2_latency_us,
     };
 
-    match result.decision {
+    let exit = match result.decision {
         Decision::Execute => {
             if result.reasoning_override.is_some() {
                 audit_entry.final_decision = "execute_reasoning_override".into();
             } else {
                 audit_entry.final_decision = "execute".into();
             }
-            audit.write(&audit_entry);
 
-            // If command had reasoning stripped, rewrite the command for execution
             if result.normalized.stripped != cmd {
                 let output = HookOutput {
                     hook_specific_output: HookSpecificOutput {
@@ -131,7 +124,6 @@ pub fn hook_mode(pipeline: &Pipeline, audit: &AuditLog) -> ExitCode {
             audit_entry.final_decision = "block".into();
             audit_entry.reason = Some(reason.clone());
             audit_entry.exit_code = Some(2);
-            audit.write(&audit_entry);
 
             let output = HookOutput {
                 hook_specific_output: HookSpecificOutput {
@@ -150,11 +142,7 @@ pub fn hook_mode(pipeline: &Pipeline, audit: &AuditLog) -> ExitCode {
         Decision::AskHuman { reason } => {
             audit_entry.final_decision = "escalate_agent".into();
             audit_entry.reason = Some(reason.clone());
-            audit.write(&audit_entry);
 
-            // Push back to the agent — deny with instructions to add reasoning.
-            // The agent can resubmit with --penelope-reasoning "why this is safe"
-            // which will override the block.
             let output = HookOutput {
                 hook_specific_output: HookSpecificOutput {
                     hook_event_name: "PreToolUse".into(),
@@ -174,5 +162,12 @@ pub fn hook_mode(pipeline: &Pipeline, audit: &AuditLog) -> ExitCode {
             eprintln!("penelope: ESCALATED — asking agent for reasoning");
             ExitCode::from(2)
         }
+    };
+
+    audit.write(&audit_entry);
+    if let Some(remote) = remote {
+        remote.send(&audit_entry);
     }
+
+    exit
 }

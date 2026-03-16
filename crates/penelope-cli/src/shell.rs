@@ -2,32 +2,28 @@ use std::process::ExitCode;
 
 use crate::audit::{AuditEntry, AuditLog};
 use crate::pipeline::{Decision, Pipeline};
+use crate::remote::RemoteLogger;
 use crate::session::get_or_create_session_id;
 
-/// Shell wrapper mode.
-/// Called when Penelope is set as SHELL and receives -c "command".
-pub fn shell_mode(
+pub async fn shell_mode(
     args: &[String],
     real_shell: &str,
     pipeline: &Pipeline,
     audit: &AuditLog,
+    remote: Option<&RemoteLogger>,
 ) -> ExitCode {
-    // Find -c argument
     let cmd = match find_dash_c_command(args) {
         Some(cmd) => cmd,
         None => {
-            // Not a -c invocation — exec the real shell directly with all args.
-            // This handles interactive shell requests.
             let err = exec_real_shell(real_shell, args);
             eprintln!("penelope: failed to exec {}: {}", real_shell, err);
             return ExitCode::from(126);
         }
     };
 
-    evaluate_and_exec(cmd, args, real_shell, pipeline, audit)
+    evaluate_and_exec(cmd, args, real_shell, pipeline, audit, remote).await
 }
 
-/// Extract the command string after -c.
 fn find_dash_c_command(args: &[String]) -> Option<&str> {
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -38,18 +34,16 @@ fn find_dash_c_command(args: &[String]) -> Option<&str> {
     None
 }
 
-/// Evaluate a command through the pipeline and either exec or block.
-pub fn evaluate_and_exec(
+pub async fn evaluate_and_exec(
     cmd: &str,
     original_args: &[String],
     real_shell: &str,
     pipeline: &Pipeline,
     audit: &AuditLog,
+    remote: Option<&RemoteLogger>,
 ) -> ExitCode {
     let session_id = get_or_create_session_id();
-    let result = pipeline.evaluate(cmd);
-
-    // Use the stripped command (without --penelope-reasoning) for execution
+    let result = pipeline.evaluate(cmd).await;
     let stripped_cmd = &result.normalized.stripped;
 
     let mut audit_entry = AuditEntry {
@@ -76,18 +70,16 @@ pub fn evaluate_and_exec(
         tier2_latency_us: result.tier2_latency_us,
     };
 
-    match result.decision {
+    let exit = match result.decision {
         Decision::Block { reason } => {
             eprintln!("penelope: BLOCKED — {}", reason);
             eprintln!("penelope: command: {}", cmd);
             audit_entry.final_decision = "block".into();
             audit_entry.reason = Some(reason);
             audit_entry.exit_code = Some(126);
-            audit.write(&audit_entry);
             ExitCode::from(126)
         }
         Decision::AskHuman { reason } => {
-            // Prompt the user via /dev/tty
             eprintln!("penelope: REVIEW REQUIRED — {}", reason);
             eprintln!("penelope: command: {}", cmd);
 
@@ -95,13 +87,11 @@ pub fn evaluate_and_exec(
             if approved {
                 audit_entry.final_decision = "execute_human_approved".into();
                 audit_entry.reason = Some(reason);
-                audit.write(&audit_entry);
                 exec_command(stripped_cmd, cmd, original_args, real_shell)
             } else {
                 audit_entry.final_decision = "block_human_denied".into();
                 audit_entry.reason = Some(reason);
                 audit_entry.exit_code = Some(126);
-                audit.write(&audit_entry);
                 ExitCode::from(126)
             }
         }
@@ -111,17 +101,21 @@ pub fn evaluate_and_exec(
             } else {
                 audit_entry.final_decision = "execute".into();
             }
-            audit.write(&audit_entry);
             exec_command(stripped_cmd, cmd, original_args, real_shell)
         }
+    };
+
+    audit.write(&audit_entry);
+    if let Some(remote) = remote {
+        remote.send(&audit_entry);
     }
+
+    exit
 }
 
-/// Prompt the user for approval via /dev/tty.
 fn prompt_human(cmd: &str) -> bool {
     use std::io::{BufRead, Write};
 
-    // Open /dev/tty directly so it works even when stdin/stdout are captured
     let tty_out = std::fs::OpenOptions::new().write(true).open("/dev/tty");
     let tty_in = std::fs::File::open("/dev/tty");
 
@@ -139,14 +133,12 @@ fn prompt_human(cmd: &str) -> bool {
             }
         }
         _ => {
-            // Can't open /dev/tty — deny by default
             eprintln!("penelope: cannot open /dev/tty for human approval, denying");
             false
         }
     }
 }
 
-/// Execute a command via the real shell.
 fn exec_command(
     stripped_cmd: &str,
     original_cmd: &str,
@@ -175,10 +167,7 @@ fn exec_command(
     }
 }
 
-/// Exec the real shell, replacing the current process.
-/// This is used for interactive shell mode.
 fn exec_real_shell(real_shell: &str, args: &[String]) -> std::io::Error {
     use std::os::unix::process::CommandExt;
-    // This replaces the current process
     std::process::Command::new(real_shell).args(args).exec()
 }

@@ -2,7 +2,7 @@ use penelope_rules::{Tier1Engine, Verdict};
 use std::time::Instant;
 
 use crate::normalize::{self, NormalizedCommand};
-use crate::tier2::OfflineAction;
+use crate::tier2::{ClassifyRequest, OfflineAction, Tier2Client};
 
 /// The final decision after evaluating a command.
 #[derive(Debug)]
@@ -37,25 +37,31 @@ pub struct EvalResult {
 /// The evaluation pipeline.
 pub struct Pipeline {
     tier1: Tier1Engine,
+    tier2: Option<Tier2Client>,
     /// What to do when a command is escalated and tier2 is unavailable.
     offline_action: OfflineAction,
 }
 
 impl Pipeline {
-    pub fn new(tier1: Tier1Engine, offline_action: OfflineAction) -> Self {
+    pub fn new(
+        tier1: Tier1Engine,
+        offline_action: OfflineAction,
+        tier2: Option<Tier2Client>,
+    ) -> Self {
         Self {
             tier1,
+            tier2,
             offline_action,
         }
     }
 
     /// Evaluate a raw command string through the pipeline.
-    pub fn evaluate(&self, raw_cmd: &str) -> EvalResult {
+    pub async fn evaluate(&self, raw_cmd: &str) -> EvalResult {
         let start = Instant::now();
         let normalized = normalize::normalize(raw_cmd);
         let has_reasoning = normalized.reasoning.is_some();
 
-        let mut result = self.evaluate_inner(&normalized, raw_cmd, start);
+        let mut result = self.evaluate_inner(&normalized, raw_cmd, start).await;
 
         // If agent provided reasoning, attempt to override blocks.
         // Tier 1 blocks are overridable by reasoning (agent explains why it's safe).
@@ -126,7 +132,88 @@ impl Pipeline {
         }
     }
 
-    fn evaluate_inner(
+    /// Handle an escalated command — call Tier 2 if available, otherwise apply offline action.
+    async fn handle_escalation(
+        &self,
+        normalized: &NormalizedCommand,
+        start: Instant,
+    ) -> EvalResult {
+        if let Some(ref tier2) = self.tier2 {
+            // Build classification request
+            let mut evasion_types = Vec::new();
+            if normalized.has_eval { evasion_types.push("eval".into()); }
+            if normalized.has_substitution { evasion_types.push("substitution".into()); }
+            if normalized.has_base64 { evasion_types.push("base64".into()); }
+            if normalized.has_nested_shell { evasion_types.push("nested_shell".into()); }
+
+            let req = ClassifyRequest {
+                command: normalized.stripped.clone(),
+                segments: normalized.segments.clone(),
+                has_evasion: normalized.has_evasion(),
+                evasion_types,
+                agent_reasoning: normalized.reasoning.clone(),
+                tier1_verdict: "escalate".into(),
+            };
+
+            match tier2.classify(&req).await {
+                Ok(tier2_result) => {
+                    let decision = if tier2_result.risk_level.should_block() {
+                        Decision::Block {
+                            reason: format!(
+                                "Tier 2 classified as {} (confidence: {:.0}%): {}",
+                                tier2_result.risk_level,
+                                tier2_result.confidence * 100.0,
+                                tier2_result.reasoning
+                            ),
+                        }
+                    } else {
+                        Decision::Execute
+                    };
+
+                    let verdict_str = format!("tier2_{}", tier2_result.risk_level);
+
+                    EvalResult {
+                        decision,
+                        tier1_verdict: verdict_str,
+                        tier1_matched_rule: None,
+                        reasoning_override: None,
+                        tier2_risk_level: Some(tier2_result.risk_level.to_string()),
+                        tier2_confidence: Some(tier2_result.confidence),
+                        tier2_reasoning: Some(tier2_result.reasoning),
+                        tier2_latency_us: Some(tier2_result.latency_us),
+                        tier2_reasoning_rejected: tier2_result.reasoning_rejected,
+                        normalized: normalized.clone(),
+                        duration_us: start.elapsed().as_micros() as u64,
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Tier 2 classification failed: {}, applying offline action", e);
+                    let decision = self.apply_offline_action(
+                        &format!("Tier 2 unavailable ({})", e),
+                    );
+                    let verdict_str = match &decision {
+                        Decision::Execute => "tier2_fallback_allowed",
+                        Decision::Block { .. } => "tier2_fallback_blocked",
+                        Decision::AskHuman { .. } => "tier2_fallback_human",
+                    };
+                    self.make_result(decision, verdict_str, None, normalized, start)
+                }
+            }
+        } else {
+            // No Tier 2 configured — apply offline action
+            let decision = self.apply_offline_action(
+                "Command requires review (no Tier 2 classifier available)",
+            );
+            let verdict_str = match &decision {
+                Decision::Execute => "escalate_allowed",
+                Decision::Block { .. } => "escalate_blocked",
+                Decision::AskHuman { .. } => "escalate_human",
+            };
+            self.make_result(decision, verdict_str, None, normalized, start)
+        }
+    }
+
+    async fn evaluate_inner(
         &self,
         normalized: &NormalizedCommand,
         raw_cmd: &str,
@@ -186,17 +273,7 @@ impl Pipeline {
                 self.make_result(Decision::Execute, "allow", None, normalized, start)
             }
             Verdict::Escalate => {
-                // Tier 2 would go here when wired up.
-                // For now, apply offline action.
-                let decision = self.apply_offline_action(
-                    "Command requires review (no Tier 2 classifier available)",
-                );
-                let verdict_str = match &decision {
-                    Decision::Execute => "escalate_allowed",
-                    Decision::Block { .. } => "escalate_blocked",
-                    Decision::AskHuman { .. } => "escalate_human",
-                };
-                self.make_result(decision, verdict_str, None, normalized, start)
+                self.handle_escalation(normalized, start).await
             }
             Verdict::Block(ref reason) => self.make_result(
                 Decision::Block { reason: reason.clone() },
@@ -221,107 +298,104 @@ mod tests {
     fn pipeline_with_offline(action: OfflineAction) -> Pipeline {
         let engine =
             Tier1Engine::new(builtin_block_rules(), builtin_allow_rules()).unwrap();
-        Pipeline::new(engine, action)
+        Pipeline::new(engine, action, None)
     }
 
-    #[test]
-    fn allows_safe_command() {
+    #[tokio::test]
+    async fn allows_safe_command() {
         let p = pipeline();
-        let r = p.evaluate("ls -la");
+        let r = p.evaluate("ls -la").await;
         assert!(matches!(r.decision, Decision::Execute));
     }
 
-    #[test]
-    fn blocks_dangerous_command() {
+    #[tokio::test]
+    async fn blocks_dangerous_command() {
         let p = pipeline();
-        let r = p.evaluate("rm -rf /");
+        let r = p.evaluate("rm -rf /").await;
         assert!(matches!(r.decision, Decision::Block { .. }));
     }
 
-    #[test]
-    fn blocks_chained_dangerous_command() {
+    #[tokio::test]
+    async fn blocks_chained_dangerous_command() {
         let p = pipeline();
-        let r = p.evaluate("echo hello && rm -rf /");
+        let r = p.evaluate("echo hello && rm -rf /").await;
         assert!(matches!(r.decision, Decision::Block { .. }));
     }
 
-    #[test]
-    fn allows_safe_chain() {
+    #[tokio::test]
+    async fn allows_safe_chain() {
         let p = pipeline();
-        let r = p.evaluate("ls && pwd && echo done");
+        let r = p.evaluate("ls && pwd && echo done").await;
         assert!(matches!(r.decision, Decision::Execute));
     }
 
-    #[test]
-    fn detects_evasion_with_blocked_payload() {
+    #[tokio::test]
+    async fn detects_evasion_with_blocked_payload() {
         let p = pipeline();
-        // bash -c triggers nested shell detection + the inner rm -rf / is blocked
-        let r = p.evaluate("bash -c 'rm -rf /'");
-        // The inner command should be caught
+        let r = p.evaluate("bash -c 'rm -rf /'").await;
         assert!(matches!(r.decision, Decision::Block { .. }));
     }
 
-    #[test]
-    fn reasoning_overrides_block() {
+    #[tokio::test]
+    async fn reasoning_overrides_block() {
         let p = pipeline();
-        let r = p.evaluate("rm -rf / --penelope-reasoning \"Cleaning up test environment\"");
+        let r = p.evaluate("rm -rf / --penelope-reasoning \"Cleaning up test environment\"").await;
         assert!(matches!(r.decision, Decision::Execute));
         assert!(r.reasoning_override.is_some());
         assert_eq!(r.reasoning_override.unwrap(), "Cleaning up test environment");
     }
 
-    #[test]
-    fn reasoning_strips_from_segments() {
+    #[tokio::test]
+    async fn reasoning_strips_from_segments() {
         let p = pipeline();
-        let r = p.evaluate("git push --force --penelope-reasoning 'Rebased feature branch'");
+        let r = p.evaluate("git push --force --penelope-reasoning 'Rebased feature branch'").await;
         assert!(matches!(r.decision, Decision::Execute));
-        // The --penelope-reasoning should not appear in segments
         assert!(!r.normalized.segments.iter().any(|s| s.contains("penelope-reasoning")));
     }
 
-    #[test]
-    fn no_reasoning_still_blocks() {
+    #[tokio::test]
+    async fn no_reasoning_still_blocks() {
         let p = pipeline();
-        let r = p.evaluate("rm -rf /");
+        let r = p.evaluate("rm -rf /").await;
         assert!(matches!(r.decision, Decision::Block { .. }));
         assert!(r.reasoning_override.is_none());
     }
 
-    #[test]
-    fn offline_escalate_asks_human() {
+    #[tokio::test]
+    async fn offline_escalate_asks_human() {
         let p = pipeline_with_offline(OfflineAction::Escalate);
-        let r = p.evaluate("terraform apply");
+        let r = p.evaluate("terraform apply").await;
         assert!(matches!(r.decision, Decision::AskHuman { .. }));
         assert_eq!(r.tier1_verdict, "escalate_human");
     }
 
-    #[test]
-    fn offline_allow_passes_through() {
+    #[tokio::test]
+    async fn offline_allow_passes_through() {
         let p = pipeline_with_offline(OfflineAction::Allow);
-        let r = p.evaluate("terraform apply");
+        let r = p.evaluate("terraform apply").await;
         assert!(matches!(r.decision, Decision::Execute));
         assert_eq!(r.tier1_verdict, "escalate_allowed");
     }
 
-    #[test]
-    fn offline_block_blocks() {
+    #[tokio::test]
+    async fn offline_block_blocks() {
         let p = pipeline_with_offline(OfflineAction::Block);
-        let r = p.evaluate("terraform apply");
+        let r = p.evaluate("terraform apply").await;
         assert!(matches!(r.decision, Decision::Block { .. }));
         assert_eq!(r.tier1_verdict, "escalate_blocked");
     }
 
-    #[test]
-    fn offline_mode_doesnt_affect_tier1_allow() {
+    #[tokio::test]
+    async fn offline_mode_doesnt_affect_tier1_allow() {
         let p = pipeline_with_offline(OfflineAction::Escalate);
-        let r = p.evaluate("ls -la");
+        let r = p.evaluate("ls -la").await;
         assert!(matches!(r.decision, Decision::Execute));
     }
 
-    #[test]
-    fn offline_mode_doesnt_affect_tier1_block() {
+    #[tokio::test]
+    async fn offline_mode_doesnt_affect_tier1_block() {
         let p = pipeline_with_offline(OfflineAction::Escalate);
-        let r = p.evaluate("rm -rf /");
+        let r = p.evaluate("rm -rf /").await;
         assert!(matches!(r.decision, Decision::Block { .. }));
     }
 }
