@@ -102,13 +102,23 @@ fn install_claude_code(bin_path: &str) -> bool {
     let mut settings = read_json_file(&settings_path).unwrap_or_else(|| json!({}));
 
     let hook_command = format!("{} hook", bin_path);
+    let post_hook_command = format!("{} post-hook", bin_path);
 
-    // Build the hook entry
+    // Build the PreToolUse hook entry
     let hook_obj = json!({
         "matcher": "Bash",
         "hooks": [{
             "type": "command",
             "command": hook_command
+        }]
+    });
+
+    // Build the PostToolUse hook entry (for learning from user feedback)
+    let post_hook_obj = json!({
+        "matcher": "Bash",
+        "hooks": [{
+            "type": "command",
+            "command": post_hook_command
         }]
     });
 
@@ -177,6 +187,40 @@ fn install_claude_code(bin_path: &str) -> bool {
         println!("penelope: added hook to Claude Code settings");
     }
 
+    // Also install PostToolUse hook for learning
+    let post_tool_use = hooks
+        .entry("PostToolUse")
+        .or_insert_with(|| json!([]))
+        .as_array_mut();
+
+    if let Some(post_arr) = post_tool_use {
+        let post_installed = post_arr.iter().any(|entry| {
+            entry
+                .get("hooks")
+                .and_then(|h| h.as_array())
+                .map(|hooks| hooks.iter().any(|h| {
+                    h.get("command").and_then(|c| c.as_str()).map(|c| c.contains("penelope")).unwrap_or(false)
+                }))
+                .unwrap_or(false)
+        });
+
+        if post_installed {
+            for entry in post_arr.iter_mut() {
+                if let Some(hooks) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+                    for h in hooks.iter_mut() {
+                        if let Some(cmd) = h.get("command").and_then(|c| c.as_str()) {
+                            if cmd.contains("penelope") {
+                                h.as_object_mut().unwrap().insert("command".into(), json!(post_hook_command));
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            post_arr.push(post_hook_obj);
+        }
+    }
+
     write_json_file(&settings_path, &settings)
 }
 
@@ -197,13 +241,14 @@ fn uninstall_claude_code() -> bool {
         }
     };
 
-    let removed = remove_penelope_hooks(&mut settings, "PreToolUse");
+    let removed_pre = remove_penelope_hooks(&mut settings, "PreToolUse");
+    let removed_post = remove_penelope_hooks(&mut settings, "PostToolUse");
 
-    if removed {
-        println!("penelope: removed hook from Claude Code settings");
+    if removed_pre || removed_post {
+        println!("penelope: removed hooks from Claude Code settings");
         write_json_file(&settings_path, &settings)
     } else {
-        println!("penelope: no penelope hook found in Claude Code settings");
+        println!("penelope: no penelope hooks found in Claude Code settings");
         true
     }
 }

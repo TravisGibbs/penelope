@@ -57,6 +57,8 @@ enum Commands {
     },
     /// Run as a Claude Code PreToolUse hook (reads JSON from stdin)
     Hook,
+    /// Run as a Claude Code PostToolUse hook (learns from outcomes)
+    PostHook,
     /// Install penelope hooks into agent tools
     Install {
         #[arg(trailing_var_arg = true)]
@@ -168,6 +170,9 @@ async fn main() -> ExitCode {
         Some(Commands::Hook) => {
             hook::hook_mode(&pipeline, &audit, remote.as_ref()).await
         }
+        Some(Commands::PostHook) => {
+            hook::post_hook_mode().await
+        }
         Some(Commands::Install { targets }) => {
             install::install_mode(&targets)
         }
@@ -251,70 +256,40 @@ fn feedback_mode(signal: &str, config: &Config) -> ExitCode {
         }
     };
 
-    // Find the last entry with tier2 features
-    let mut last_features: Option<learner::RiskFeatures> = None;
     let mut last_command = String::new();
+    let mut found = false;
 
     for line in contents.lines().rev() {
         if let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) {
-            // Look for entries that went through tier2 or were escalated
             let verdict = entry.get("tier1_verdict").and_then(|v| v.as_str()).unwrap_or("");
             if verdict.starts_with("tier2_") || verdict.contains("escalate") {
-                // Try to extract features from tier2 fields
-                let is_destructive = entry.get("tier2_risk_level").is_some();
-                if is_destructive {
-                    // We have tier2 data — reconstruct features
-                    // For now, use a simple feature extraction from what's logged
-                    last_command = entry.get("command").and_then(|v| v.as_str()).unwrap_or("").to_string();
-
-                    // Check if we have the raw features (from tier2 response)
-                    // Fall back to approximating from what we have
-                    let risk_level = entry.get("tier2_risk_level").and_then(|v| v.as_str()).unwrap_or("medium");
-                    let confidence = entry.get("tier2_confidence").and_then(|v| v.as_f64()).unwrap_or(0.5);
-
-                    last_features = Some(learner::RiskFeatures {
-                        is_destructive: if risk_level == "block" || risk_level == "high" { confidence } else { 0.1 },
-                        is_exfiltration: 0.0,
-                        is_privilege_escalation: 0.0,
-                        is_normal_dev: if risk_level == "low" { confidence } else { 0.1 },
-                        overall_risk: match risk_level {
-                            "block" => 0.95,
-                            "high" => 0.75,
-                            "medium" => 0.5,
-                            _ => 0.2,
-                        },
-                    });
-                    break;
-                }
-
-                // No tier2 data but was escalated — use defaults for the escalation
-                if verdict.contains("escalate") {
-                    last_command = entry.get("command").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    last_features = Some(learner::RiskFeatures {
-                        is_destructive: 0.3,
-                        is_exfiltration: 0.1,
-                        is_privilege_escalation: 0.1,
-                        is_normal_dev: 0.3,
-                        overall_risk: 0.5,
-                    });
-                    break;
-                }
+                last_command = entry.get("command").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                found = true;
+                break;
             }
         }
     }
 
-    let features = match last_features {
-        Some(f) => f,
-        None => {
-            eprintln!("penelope: no recent escalation found in audit log");
-            return ExitCode::from(1);
-        }
-    };
+    if !found {
+        eprintln!("penelope: no recent escalation found in audit log");
+        return ExitCode::from(1);
+    }
 
-    // Load user model, update, save
-    let user_id = session::get_or_create_session_id();
-    let model_path = learner::UserModel::model_path(&user_id);
-    let mut model = learner::UserModel::load(&model_path);
+    // Extract features from the command
+    let features = learner::RiskFeatures::extract(
+        &last_command,
+        &[last_command.clone()],
+        None,
+        false,
+        false,
+        false,
+    );
+
+    // Load per-repo model, update, save
+    let repo_id = learner::detect_repo_id();
+    let model_path = learner::UserModel::model_path(&repo_id);
+    let mut model = learner::UserModel::load(&model_path)
+        .unwrap_or_else(|| learner::UserModel::new(&repo_id));
 
     let before = model.predict(&features);
     model.update(&features, is_correct);
@@ -327,6 +302,7 @@ fn feedback_mode(signal: &str, config: &Config) -> ExitCode {
 
     let label = if is_correct { "correct" } else { "false positive" };
     println!("penelope: feedback recorded as '{}'", label);
+    println!("  Repo: {}", repo_id);
     println!("  Command: {}", last_command);
     println!("  Risk score: {:.1}% → {:.1}%", before * 100.0, after * 100.0);
     println!("  Model updates: {}", model.n_updates);

@@ -4,6 +4,7 @@ use std::process::ExitCode;
 use serde::{Deserialize, Serialize};
 
 use crate::audit::{AuditEntry, AuditLog};
+use crate::learner::{detect_repo_id, RiskFeatures, UserModel};
 use crate::pipeline::{Decision, Pipeline};
 use crate::remote::RemoteLogger;
 use crate::session::get_or_create_session_id;
@@ -195,4 +196,110 @@ pub async fn hook_mode(
     }
 
     exit
+}
+
+/// PostToolUse hook — learns from user approve/deny decisions.
+///
+/// Claude Code calls this after a tool use completes. We check if the
+/// previous PreToolUse returned "ask" and whether the user approved or denied.
+///
+/// User approved an escalation → feedback: false (shouldn't have asked)
+/// User denied an escalation → feedback: true (correct catch)
+pub async fn post_hook_mode() -> ExitCode {
+    let mut input = String::new();
+    if let Err(_) = std::io::stdin().read_to_string(&mut input) {
+        return ExitCode::SUCCESS;
+    }
+
+    let post_input: serde_json::Value = match serde_json::from_str(&input) {
+        Ok(v) => v,
+        Err(_) => return ExitCode::SUCCESS,
+    };
+
+    // Only process Bash tool results
+    let tool_name = post_input
+        .get("tool_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if tool_name != "Bash" {
+        return ExitCode::SUCCESS;
+    }
+
+    // Check if this was a penelope-escalated command by looking at the
+    // tool_use_id in our recent audit entries. The hook_response field
+    // tells us if the user was prompted and what they chose.
+    let was_user_prompted = post_input
+        .get("was_prompted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    if !was_user_prompted {
+        // User wasn't asked — nothing to learn from
+        return ExitCode::SUCCESS;
+    }
+
+    // If we get here, the user was prompted (penelope returned "ask")
+    // and they either approved or denied.
+    let tool_result = post_input.get("tool_result");
+    let was_error = post_input
+        .get("error")
+        .and_then(|v| v.as_str())
+        .is_some();
+
+    // If the tool ran successfully, user approved → false positive feedback
+    // If there's an error/denial, user denied → true positive feedback
+    let label = was_error; // true = correct catch, false = false positive
+
+    // Extract the command for feature generation
+    let command = post_input
+        .get("tool_input")
+        .and_then(|v| v.get("command"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if command.is_empty() {
+        return ExitCode::SUCCESS;
+    }
+
+    let description = post_input
+        .get("tool_input")
+        .and_then(|v| v.get("description"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    // Extract features from the command
+    let features = RiskFeatures::extract(
+        command,
+        &[command.to_string()],
+        None, // No TypeSafe features in post-hook
+        !description.is_empty(),
+        false,
+        false,
+    );
+
+    // Load per-repo model, update, save
+    let repo_id = detect_repo_id();
+    let model_path = UserModel::model_path(&repo_id);
+    let mut model = UserModel::load(&model_path).unwrap_or_else(|| UserModel::new(&repo_id));
+
+    let before = model.predict(&features);
+    model.update(&features, label);
+    let after = model.predict(&features);
+
+    if let Err(e) = model.save(&model_path) {
+        tracing::warn!("Failed to save learner model: {}", e);
+    } else {
+        let feedback_type = if label { "correct_catch" } else { "false_positive" };
+        tracing::info!(
+            repo = repo_id,
+            command = command,
+            feedback = feedback_type,
+            before = format!("{:.1}%", before * 100.0),
+            after = format!("{:.1}%", after * 100.0),
+            updates = model.n_updates,
+            "Learner updated from user feedback"
+        );
+    }
+
+    ExitCode::SUCCESS
 }
