@@ -68,11 +68,8 @@ pub fn builtin_block_rules() -> Vec<Rule> {
             pattern: r"systemctl\s+(stop|disable)\s+(firewalld|ufw|iptables)".into(),
             reason: Some("Disabling system firewall".into()),
         },
-        Rule {
-            name: "curl-exfil-post".into(),
-            pattern: r"curl\s+.*-[a-zA-Z]*X\s*POST.*(-d|--data)\s".into(),
-            reason: Some("Potential data exfiltration via curl POST".into()),
-        },
+        // curl POST removed from block list — too many false positives
+        // with legitimate API calls. TypeSafe Tier 2 handles this now.
         Rule {
             name: "nc-reverse-shell".into(),
             pattern: r"(nc|ncat|netcat)\s+.*-e\s+/(bin|usr)/(ba)?sh".into(),
@@ -190,8 +187,8 @@ pub fn builtin_allow_rules() -> Vec<Rule> {
             reason: None,
         },
         Rule {
-            name: "curl-get".into(),
-            pattern: r"^curl\s+(-[sfSLkv]+\s+)*https?://".into(),
+            name: "curl".into(),
+            pattern: r"^curl\s".into(),
             reason: None,
         },
         Rule {

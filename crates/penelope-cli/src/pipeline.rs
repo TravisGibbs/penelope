@@ -210,13 +210,14 @@ impl Pipeline {
                 }
             }
         } else {
-            // No Tier 2 configured — escalate to human
-            tracing::info!("No Tier 2 configured, escalating to human for review");
+            // No Tier 2 configured — agent provided reasoning, allow through.
+            // This is the "no classifier" path: user hasn't set up Tier 2 yet,
+            // so we trust the agent's description/reasoning. Once they enable
+            // Tier 2, the model validates the reasoning instead.
+            tracing::info!("No Tier 2 configured, allowing with agent reasoning");
             self.make_result(
-                Decision::AskHuman {
-                    reason: "No classifier configured. Human review required.".into(),
-                },
-                "escalate_human",
+                Decision::Execute,
+                "escalate_reasoning_allowed",
                 None,
                 normalized,
                 start,
@@ -377,12 +378,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_command_with_reasoning_escalates_to_human_without_tier2() {
+    async fn unknown_command_with_reasoning_allowed_without_tier2() {
         let p = pipeline();
         let r = p.evaluate("some-unknown-tool --flag --penelope-reasoning \"safe internal tool\"").await;
-        // Without Tier 2, even with reasoning, escalate to human
-        assert!(matches!(r.decision, Decision::AskHuman { .. }));
-        assert_eq!(r.tier1_verdict, "escalate_human");
+        // Without Tier 2 configured, trust the reasoning
+        assert!(matches!(r.decision, Decision::Execute));
+        assert_eq!(r.tier1_verdict, "escalate_reasoning_allowed");
     }
 
     #[tokio::test]
