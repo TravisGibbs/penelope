@@ -3,6 +3,7 @@ mod config;
 mod exec;
 mod hook;
 mod install;
+mod learner;
 mod normalize;
 mod pipeline;
 mod register;
@@ -76,6 +77,11 @@ enum Commands {
     On,
     /// Disable penelope screening (removes hook, pass-through)
     Off,
+    /// Give feedback on the last escalation
+    Feedback {
+        /// "ok" (correct escalation) or "bad" (shouldn't have asked)
+        signal: String,
+    },
 }
 
 #[tokio::main]
@@ -177,6 +183,9 @@ async fn main() -> ExitCode {
         Some(Commands::Off) => {
             install::uninstall_mode(&[])
         }
+        Some(Commands::Feedback { signal }) => {
+            feedback_mode(&signal, &config)
+        }
         None => {
             if !cli.shell_args.is_empty() {
                 shell::shell_mode(
@@ -220,4 +229,108 @@ fn build_pipeline(config: &Config) -> (Pipeline, AuditLog, Option<RemoteLogger>)
     }
 
     (pipeline, audit, remote)
+}
+
+fn feedback_mode(signal: &str, config: &Config) -> ExitCode {
+    let is_correct = match signal.to_lowercase().as_str() {
+        "ok" | "good" | "yes" | "correct" | "true" => true,
+        "bad" | "no" | "wrong" | "false" | "fp" => false,
+        _ => {
+            eprintln!("penelope: unknown feedback signal '{}'. Use 'ok' or 'bad'.", signal);
+            return ExitCode::from(1);
+        }
+    };
+
+    // Find the last escalated entry in the audit log
+    let log_path = config.log_file_path();
+    let contents = match std::fs::read_to_string(&log_path) {
+        Ok(c) => c,
+        Err(_) => {
+            eprintln!("penelope: no audit log found at {}", log_path.display());
+            return ExitCode::from(1);
+        }
+    };
+
+    // Find the last entry with tier2 features
+    let mut last_features: Option<learner::RiskFeatures> = None;
+    let mut last_command = String::new();
+
+    for line in contents.lines().rev() {
+        if let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) {
+            // Look for entries that went through tier2 or were escalated
+            let verdict = entry.get("tier1_verdict").and_then(|v| v.as_str()).unwrap_or("");
+            if verdict.starts_with("tier2_") || verdict.contains("escalate") {
+                // Try to extract features from tier2 fields
+                let is_destructive = entry.get("tier2_risk_level").is_some();
+                if is_destructive {
+                    // We have tier2 data — reconstruct features
+                    // For now, use a simple feature extraction from what's logged
+                    last_command = entry.get("command").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+                    // Check if we have the raw features (from tier2 response)
+                    // Fall back to approximating from what we have
+                    let risk_level = entry.get("tier2_risk_level").and_then(|v| v.as_str()).unwrap_or("medium");
+                    let confidence = entry.get("tier2_confidence").and_then(|v| v.as_f64()).unwrap_or(0.5);
+
+                    last_features = Some(learner::RiskFeatures {
+                        is_destructive: if risk_level == "block" || risk_level == "high" { confidence } else { 0.1 },
+                        is_exfiltration: 0.0,
+                        is_privilege_escalation: 0.0,
+                        is_normal_dev: if risk_level == "low" { confidence } else { 0.1 },
+                        overall_risk: match risk_level {
+                            "block" => 0.95,
+                            "high" => 0.75,
+                            "medium" => 0.5,
+                            _ => 0.2,
+                        },
+                    });
+                    break;
+                }
+
+                // No tier2 data but was escalated — use defaults for the escalation
+                if verdict.contains("escalate") {
+                    last_command = entry.get("command").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    last_features = Some(learner::RiskFeatures {
+                        is_destructive: 0.3,
+                        is_exfiltration: 0.1,
+                        is_privilege_escalation: 0.1,
+                        is_normal_dev: 0.3,
+                        overall_risk: 0.5,
+                    });
+                    break;
+                }
+            }
+        }
+    }
+
+    let features = match last_features {
+        Some(f) => f,
+        None => {
+            eprintln!("penelope: no recent escalation found in audit log");
+            return ExitCode::from(1);
+        }
+    };
+
+    // Load user model, update, save
+    let user_id = session::get_or_create_session_id();
+    let model_path = learner::UserModel::model_path(&user_id);
+    let mut model = learner::UserModel::load(&model_path);
+
+    let before = model.predict(&features);
+    model.update(&features, is_correct);
+    let after = model.predict(&features);
+
+    if let Err(e) = model.save(&model_path) {
+        eprintln!("penelope: failed to save model: {}", e);
+        return ExitCode::from(1);
+    }
+
+    let label = if is_correct { "correct" } else { "false positive" };
+    println!("penelope: feedback recorded as '{}'", label);
+    println!("  Command: {}", last_command);
+    println!("  Risk score: {:.1}% → {:.1}%", before * 100.0, after * 100.0);
+    println!("  Model updates: {}", model.n_updates);
+    println!("  Saved to: {}", model_path.display());
+
+    ExitCode::SUCCESS
 }
