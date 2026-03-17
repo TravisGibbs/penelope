@@ -196,11 +196,13 @@ impl Pipeline {
                     }
                 }
                 Err(e) => {
-                    // Tier 2 failed but agent provided reasoning — trust the agent
-                    tracing::warn!("Tier 2 unavailable ({}), allowing with agent reasoning", e);
+                    // Tier 2 failed — escalate to human, don't silently allow
+                    tracing::warn!("Tier 2 unavailable ({}), escalating to human", e);
                     self.make_result(
-                        Decision::Execute,
-                        "tier2_fallback_reasoning_allowed",
+                        Decision::AskHuman {
+                            reason: format!("Classification unavailable ({}). Human review required.", e),
+                        },
+                        "tier2_fallback_human",
                         None,
                         normalized,
                         start,
@@ -208,11 +210,13 @@ impl Pipeline {
                 }
             }
         } else {
-            // No Tier 2 configured but agent provided reasoning — allow
-            tracing::info!("No Tier 2 configured, allowing with agent reasoning");
+            // No Tier 2 configured — escalate to human
+            tracing::info!("No Tier 2 configured, escalating to human for review");
             self.make_result(
-                Decision::Execute,
-                "escalate_reasoning_allowed",
+                Decision::AskHuman {
+                    reason: "No classifier configured. Human review required.".into(),
+                },
+                "escalate_human",
                 None,
                 normalized,
                 start,
@@ -373,11 +377,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_command_with_reasoning_allowed_without_tier2() {
+    async fn unknown_command_with_reasoning_escalates_to_human_without_tier2() {
         let p = pipeline();
         let r = p.evaluate("some-unknown-tool --flag --penelope-reasoning \"safe internal tool\"").await;
-        assert!(matches!(r.decision, Decision::Execute));
-        assert_eq!(r.tier1_verdict, "escalate_reasoning_allowed");
+        // Without Tier 2, even with reasoning, escalate to human
+        assert!(matches!(r.decision, Decision::AskHuman { .. }));
+        assert_eq!(r.tier1_verdict, "escalate_human");
     }
 
     #[tokio::test]

@@ -2,8 +2,7 @@
 """
 Generate the Penelope install banner using a 2D character buffer.
 
-No external dependencies — uses pre-generated ASCII title text and
-hand-drawn pixel art for the lynx point cat mascot.
+No external dependencies — uses pre-generated block-letter ASCII title.
 
 Usage:
     python3 scripts/generate_banner.py          # preview in terminal
@@ -23,10 +22,8 @@ DIM     = "\033[2m"
 GREEN   = "\033[38;5;78m"
 CYAN    = "\033[38;5;117m"
 MAGENTA = "\033[38;5;183m"
-YELLOW  = "\033[38;5;222m"
 WHITE   = "\033[38;5;255m"
 GRAY    = "\033[38;5;242m"
-# Lynx point colors: cream/tan body, brown tabby points
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -58,7 +55,7 @@ def center_line(content: str, inner_w: int) -> str:
 
 # ── Build banner ─────────────────────────────────────────────────────
 
-def generate_banner(version: str = "0.1.0", targets: str = "claude") -> str:
+def generate_banner() -> str:
     term_width = min(shutil.get_terminal_size().columns, 72)
     inner_w = term_width - 4  # 2 border chars + 2 padding spaces
 
@@ -86,31 +83,14 @@ def generate_banner(version: str = "0.1.0", targets: str = "claude") -> str:
         centered = center_line(f"{MAGENTA}{BOLD}{tl}{RESET}", inner_w)
         lines.append(f"{L}│{RESET} {centered} {L}│{RESET}")
 
-    # Separator
-    lines.append(f"{L}│{RESET} {GRAY}{'─' * inner_w}{RESET} {L}│{RESET}")
+    # Empty line
+    lines.append(f"{L}│{' ' * (term_width - 2)}│{RESET}")
 
-    # Info section
-    info_lines = [
-        f"{WHITE}{BOLD}  CLI proxy for screening agent commands{RESET}",
-        "",
-        f"  {GRAY}version  {RESET}{GREEN}{version}{RESET}",
-        f"  {GRAY}target   {RESET}{YELLOW}{targets}{RESET}",
-        f"  {GRAY}install  {RESET}{WHITE}~/.penelope/bin/penelope{RESET}",
-        "",
-        f"  {DIM}github.com/TravisGibbs/penelope{RESET}",
-    ]
-
-    for inf in info_lines:
-        padded = pad_line(inf, inner_w)
-        lines.append(f"{L}│{RESET} {padded} {L}│{RESET}")
-
-    # Separator
-    lines.append(f"{L}│{RESET} {GRAY}{'─' * inner_w}{RESET} {L}│{RESET}")
-
-    # Status line
-    status = f"{GREEN}{BOLD}  ▸ Installing...{RESET}"
-    padded = pad_line(status, inner_w)
-    lines.append(f"{L}│{RESET} {padded} {L}│{RESET}")
+    # Tagline + repo (static, inside box)
+    tagline = f"        {WHITE}{BOLD}CLI proxy for screening agent commands{RESET}"
+    lines.append(f"{L}│{RESET} {pad_line(tagline, inner_w)} {L}│{RESET}")
+    repo = f"        {DIM}github.com/TravisGibbs/penelope{RESET}"
+    lines.append(f"{L}│{RESET} {pad_line(repo, inner_w)} {L}│{RESET}")
 
     # Empty line
     lines.append(f"{L}│{' ' * (term_width - 2)}│{RESET}")
@@ -144,13 +124,16 @@ if __name__ == "__main__":
     bash_mode = "--bash" in sys.argv
 
     if bash_mode:
-        # Use shell variable placeholders for dynamic values
-        banner = generate_banner(version="$VERSION", targets="$TARGETS")
+        banner = generate_banner()
         print(to_bash_function(banner))
     else:
         version = "0.1.0"
         targets = "claude"
-        banner = generate_banner(version=version, targets=targets)
+        banner = generate_banner()
         print()
         print(banner)
+        print()
+        print(f"  {GRAY}version{RESET}  {version}")
+        print(f"  {GRAY}target{RESET}   {targets}")
+        print(f"  {GRAY}install{RESET}  ~/.penelope/bin/penelope")
         print()
